@@ -12,7 +12,7 @@ class AnomalyDetector {
     batchSize: 32,
     latentDim: 24
   };
-  private threshold: number = 2.0;
+  private threshold: number = 3.5;
   private sensitivity: number = 5.0; 
   private windowSize: number = 12;
   private errorStats: number[] = [];
@@ -42,7 +42,7 @@ class AnomalyDetector {
         const parsed = JSON.parse(savedStats);
         this.errorStats = parsed.errorStats || [];
         this.totalProcessedFiles = parsed.totalProcessedFiles || 0;
-        this.threshold = parsed.threshold || 2.0;
+        this.threshold = parsed.threshold || 3.5;
         this.sensitivity = parsed.sensitivity || 5.0;
       }
     } catch (e) {
@@ -78,19 +78,15 @@ class AnomalyDetector {
 
   public scaleFrame(frame: number[]) {
     return frame.map(v => {
-      // Bardziej agresywne tłumienie szumu (Noise Floor Reduction)
-      const val = Math.max(0, v - 5); 
-      const compressed = Math.log10(1 + val) / Math.log10(1000); 
+      // Skalowanie z przesuniętym zerem, aby zignorować mikro-szumy tła
+      const val = Math.max(0, v - 0.1); 
+      const compressed = Math.log10(1 + val * 5) / Math.log10(50); 
       return Math.min(255, Math.max(0, compressed * 255));
     });
   }
 
-  /**
-   * Wylicza próg metodą Robust MAD (Median Absolute Deviation).
-   * Jest to metoda odporna na outliery, idealna do szukania szpilek w szumie.
-   */
   public calculateRobustThreshold(scores: number[]) {
-    if (scores.length < 10) return 2.0;
+    if (scores.length < 10) return 3.0;
     
     const sorted = [...scores].sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
@@ -99,49 +95,68 @@ class AnomalyDetector {
     const sortedDeviations = [...absoluteDeviations].sort((a, b) => a - b);
     const mad = sortedDeviations[Math.floor(sortedDeviations.length / 2)];
     
-    // Mnożnik (domyślnie 3-5 dla MAD to bardzo silne wykrywanie)
-    // Dostosowanie czułości: 10 -> mały mnożnik (czuły), 1 -> duży mnożnik (odporny)
-    const multiplier = 12 - (this.sensitivity * 0.9);
-    
-    // MAD * 1.4826 to estymator odchylenia standardowego dla rozkładu normalnego
+    // ZNACZNIE PODNIESIONY MNOŻNIK BAZOWY
+    // Sensitivity 5 (Standard) -> multiplier = 12 - 3.75 = 8.25 (Solidny margines)
+    // Sensitivity 10 (Ultra) -> multiplier = 12 - 7.5 = 4.5 (Nadal bezpiecznie)
+    const multiplier = 12.0 - (this.sensitivity * 0.75);
     const sigmaEst = mad * 1.4826;
     
-    return median + (multiplier * sigmaEst);
+    // Minimalny próg 0.5, aby uniknąć fałszywych alarmów przy idealnie czystym sygnale
+    return Math.max(0.5, median + (multiplier * sigmaEst));
   }
 
   private updateThreshold() {
-    if (this.errorStats.length < 50) return;
+    if (this.errorStats.length < 20) return;
     this.threshold = this.calculateRobustThreshold(this.errorStats);
   }
 
   public async trainOnFile(frames: number[][], label: 'Normal' | 'Anomaly') {
     if (!this.model) return { error: 0 };
+    
     const sequences: number[][][] = [];
     for (let i = 0; i <= frames.length - this.windowSize; i += 4) {
       sequences.push(frames.slice(i, i + this.windowSize));
     }
     if (sequences.length === 0) return { error: 0 };
 
-    return await tf.tidy(() => {
-      const xs = tf.tensor3d(sequences);
-      const normXs = xs.div(tf.scalar(255));
+    const xs = tf.tensor3d(sequences);
+    const normXs = xs.div(tf.scalar(255));
+
+    try {
       if (label === 'Normal') {
-        this.model!.fit(normXs, normXs, { epochs: 3, batchSize: 32, verbose: 0 });
+        // Zwiększono liczbę epok do 5, aby model lepiej "zapamiętał" wzorzec poprawny
+        await this.model.fit(normXs, normXs, { 
+          epochs: 5, 
+          batchSize: 32, 
+          verbose: 0,
+          shuffle: true 
+        });
         this.totalProcessedFiles++;
       }
-      const predictions = this.model!.predict(normXs) as tf.Tensor;
+
+      const predictions = this.model.predict(normXs) as tf.Tensor;
       const errors = tf.losses.meanSquaredError(normXs, predictions).mean(1);
-      const errorData = errors.dataSync();
-      const avgError = (errorData.reduce((a,b) => a+b, 0) / errorData.length) * 1000;
+      const errorData = await errors.data();
+      const typedErrorData = errorData as Float32Array;
+      const avgError = (Array.from(typedErrorData).reduce((a: number, b: number) => a + b, 0) / typedErrorData.length) * 1000;
       
       if (label === 'Normal') {
-        for(let i=0; i<errorData.length; i+=2) this.errorStats.push(errorData[i] * 1000);
+        for(let i = 0; i < typedErrorData.length; i += 2) {
+          this.errorStats.push((typedErrorData[i] as number) * 1000);
+        }
         if (this.errorStats.length > 5000) this.errorStats = this.errorStats.slice(-5000);
         this.updateThreshold();
       }
+
+      predictions.dispose();
+      errors.dispose();
+      
       this.persist();
       return { error: avgError };
-    });
+    } finally {
+      xs.dispose();
+      normXs.dispose();
+    }
   }
 
   public async predict(sequence: number[][]) {
@@ -151,7 +166,8 @@ class AnomalyDetector {
       const normInput = input.div(tf.scalar(255));
       const output = this.model!.predict(normInput) as tf.Tensor;
       const error = tf.losses.meanSquaredError(normInput, output);
-      return { score: (error.dataSync()[0] as number) * 1000 };
+      const data = error.dataSync() as Float32Array;
+      return { score: (data[0] as number) * 1000 };
     });
   }
 
@@ -170,7 +186,7 @@ class AnomalyDetector {
   public async clearKnowledge() {
     this.errorStats = [];
     this.totalProcessedFiles = 0;
-    this.threshold = 2.0;
+    this.threshold = 3.5;
     localStorage.removeItem('sentinel_stats');
     try { await tf.io.removeModel(STORAGE_PATH); } catch {}
     await this.createNewModel();
@@ -181,8 +197,7 @@ class AnomalyDetector {
   }
 
   public getMemInfo() {
-    const mem = tf.memory();
-    return { numTensors: mem.numTensors, numBytes: mem.numBytes };
+    return tf.memory();
   }
 }
 

@@ -50,7 +50,6 @@ const App: React.FC = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mainAudioRef = useRef<HTMLAudioElement | null>(null);
-  const consoleRef = useRef<HTMLDivElement>(null);
   const monitoringRef = useRef<boolean>(false);
   const liveBufferRef = useRef<number[][]>([]);
 
@@ -63,7 +62,10 @@ const App: React.FC = () => {
         setIsPersistent(detector.getIsLoadedFromStorage());
         setTotalTrained(detector.getTotalFiles());
         setStatus('System gotowy');
-        memInterval = setInterval(() => setRamUsage(detector.getMemInfo()?.numBytes || 0), 5000);
+        memInterval = setInterval(() => {
+          const mem = detector.getMemInfo();
+          setRamUsage(mem ? mem.numBytes : 0);
+        }, 5000);
       } catch (err) {
         setStatus('Błąd TF');
       }
@@ -86,6 +88,26 @@ const App: React.FC = () => {
     }
   };
 
+  const normalizeTensor = (tensor: tf.Tensor1D): { normalized: tf.Tensor1D, gainDb: number } => {
+    return tf.tidy(() => {
+      const square = tensor.square();
+      const mean = square.mean();
+      const rms = tf.sqrt(mean);
+      const rmsVal = rms.dataSync()[0];
+      
+      // Target RMS: -24dB (0.063) - bezpieczniejszy poziom dla industrialnych nagrań
+      const targetRms = 0.063;
+      const gain = targetRms / (rmsVal + 1e-8);
+      const gainDb = 20 * Math.log10(gain);
+      
+      // Dodatkowo: Prosty Peak Limiter, aby uniknąć clippingu powyżej 0.95
+      return {
+        normalized: tensor.mul(gain).clipByValue(-0.95, 0.95),
+        gainDb
+      };
+    });
+  };
+
   const addToQueue = (files: FileList | null, label: 'Normal' | 'Anomaly') => {
     if (!files) return;
     const newItems: FileQueueItem[] = Array.from(files)
@@ -100,7 +122,6 @@ const App: React.FC = () => {
     let numerator = 0;
     let denominator = 0;
     for (let i = 0; i < magnitudes.length; i++) {
-      // Skupiamy się na słyszalnym paśmie maszyny (np. do 8kHz)
       const weight = magnitudes[i];
       numerator += (i * binHz) * weight;
       denominator += weight;
@@ -111,33 +132,48 @@ const App: React.FC = () => {
   const runIncrementalTraining = async () => {
     if (trainingQueue.length === 0) return;
     setMode('TRAINING');
+    setStatus('Trenowanie...');
     const audioCtx = new AudioContext();
-    for (let i = 0; i < trainingQueue.length; i++) {
-      const item = trainingQueue[i];
-      setBatchProgress(Math.round((i / trainingQueue.length) * 100));
-      try {
-        const arrayBuffer = await item.file.arrayBuffer();
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-        const channelData = audioBuffer.getChannelData(0);
-        const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
-        const audioTensor = tf.tensor1d(channelData);
-        const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
-        const magnitudes = tf.abs(spectrogram);
-        const spectrogramData = await magnitudes.array() as number[][];
-        const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
-        const { error } = await detector.trainOnFile(frames, item.label);
-        audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
-        addLog(`Uczono: ${item.file.name} (E: ${error.toFixed(2)})`);
-        setTotalTrained(detector.getTotalFiles());
-        setIsPersistent(true);
-      } catch (err) {
-        addLog(`Błąd pliku: ${item.file.name}`, 'error');
+    
+    try {
+      for (let i = 0; i < trainingQueue.length; i++) {
+        const item = trainingQueue[i];
+        setBatchProgress(Math.round((i / trainingQueue.length) * 100));
+        addLog(`Uczenie: ${item.file.name}...`);
+        
+        try {
+          const arrayBuffer = await item.file.arrayBuffer();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const rawChannelData = audioBuffer.getChannelData(0);
+          
+          const rawTensor = tf.tensor1d(rawChannelData);
+          const { normalized: audioTensor, gainDb } = normalizeTensor(rawTensor);
+          rawTensor.dispose();
+
+          const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
+          const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
+          const magnitudes = tf.abs(spectrogram);
+          const spectrogramData = await magnitudes.array() as number[][];
+          
+          const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
+          const { error } = await detector.trainOnFile(frames, item.label);
+          
+          audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
+          addLog(`Nauczono: ${item.file.name} (Err: ${error.toFixed(2)})`, 'success');
+        } catch (err) {
+          addLog(`Błąd: ${item.file.name}`, 'error');
+        }
+        await tf.nextFrame();
       }
-      await tf.nextFrame();
+    } finally {
+      setTrainingQueue([]);
+      setMode('IDLE');
+      setStatus('Gotowy');
+      setTotalTrained(detector.getTotalFiles());
+      setIsPersistent(true);
+      setDynamicThreshold(detector.getThreshold());
+      audioCtx.close();
     }
-    setTrainingQueue([]);
-    setMode('IDLE');
-    setStatus('Gotowy');
   };
 
   const analyzeSingleFile = async (file: File) => {
@@ -151,13 +187,17 @@ const App: React.FC = () => {
       const audioCtx = new AudioContext();
       const arrayBuffer = await file.arrayBuffer();
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-      const channelData = audioBuffer.getChannelData(0);
+      const rawChannelData = audioBuffer.getChannelData(0);
       
+      const rawTensor = tf.tensor1d(rawChannelData);
+      const { normalized: audioTensor, gainDb } = normalizeTensor(rawTensor);
+      rawTensor.dispose();
+      addLog(`Auto-Leveling: ${gainDb.toFixed(1)}dB`, 'info');
+
       const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
       const frameDurationSec = frameStep / audioBuffer.sampleRate;
       const windowSize = detector.getWindowSize();
       
-      const audioTensor = tf.tensor1d(channelData);
       const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
       const magnitudes = tf.abs(spectrogram);
       const spectrogramData = await magnitudes.array() as number[][];
@@ -166,7 +206,6 @@ const App: React.FC = () => {
       const allScores: number[] = [];
       const preliminaryData: {timestamp: number, hz: number, score: number}[] = [];
 
-      // Faza 1: Obliczanie błędów rekonstrukcji
       for (let i = 0; i <= numFrames - windowSize; i++) {
         const rawSequence = spectrogramData.slice(i, i + windowSize);
         const sequence = rawSequence.map(frame => detector.scaleFrame(frame.slice(0, 128)));
@@ -182,23 +221,25 @@ const App: React.FC = () => {
         }
       }
 
-      // Faza 2: Detekcja charakterystycznych wychyleń (Robust MAD)
-      const localThresh = detector.calculateRobustThreshold(allScores);
+      const localThresh = detector.getTotalFiles() > 0 
+        ? detector.getThreshold() 
+        : detector.calculateRobustThreshold(allScores);
+        
       setDynamicThreshold(localThresh);
-      addLog(`Auto-kalibracja zakończona (Próg: ${localThresh.toFixed(2)})`, 'success');
 
       const finalChartData: AudioChartData[] = [];
       const finalAnomalies: Anomaly[] = [];
+      // Zwiększono bufor wygładzania do 15, aby uniknąć chwilowych pików
       let smoothScoreBuffer: number[] = [];
       let smoothHzBuffer: number[] = [];
 
       preliminaryData.forEach((point, idx) => {
         smoothScoreBuffer.push(point.score);
-        if (smoothScoreBuffer.length > 10) smoothScoreBuffer.shift();
+        if (smoothScoreBuffer.length > 15) smoothScoreBuffer.shift();
         const smoothedScore = smoothScoreBuffer.reduce((a,b)=>a+b,0) / smoothScoreBuffer.length;
 
         smoothHzBuffer.push(point.hz);
-        if (smoothHzBuffer.length > 5) smoothHzBuffer.shift();
+        if (smoothHzBuffer.length > 8) smoothHzBuffer.shift();
         const smoothedHz = smoothHzBuffer.reduce((a,b)=>a+b,0) / smoothHzBuffer.length;
 
         if (idx % 2 === 0) {
@@ -212,15 +253,15 @@ const App: React.FC = () => {
 
         if (smoothedScore > localThresh) {
           const lastAnom = finalAnomalies[finalAnomalies.length - 1];
-          // Dodano warunek "characteristic delay" aby uniknąć glichy
-          if (!lastAnom || (point.timestamp - (lastAnom.offsetSeconds! + lastAnom.durationSeconds)) > 0.6) {
+          // Zwiększono margines łączenia zdarzeń do 0.8s
+          if (!lastAnom || (point.timestamp - (lastAnom.offsetSeconds! + lastAnom.durationSeconds)) > 0.8) {
             finalAnomalies.push({ 
               id: `anom-${idx}`, 
               timestamp: new Date(), 
               offsetSeconds: point.timestamp, 
-              durationSeconds: frameDurationSec * 6, 
+              durationSeconds: frameDurationSec * 10, 
               intensity: smoothedScore / localThresh, 
-              severity: smoothedScore > localThresh * 2.2 ? 'High' : 'Medium', 
+              severity: smoothedScore > localThresh * 2.5 ? 'High' : 'Medium', 
               description: `ZDARZENIE`, 
               type: 'Acoustic Shift' 
             });
@@ -238,7 +279,8 @@ const App: React.FC = () => {
       setMode('IDLE');
       setStatus('Gotowy');
       audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
-      addLog(`Wykryto ${finalAnomalies.length} istotnych anomalii powyżej tła.`, finalAnomalies.length > 0 ? 'warning' : 'success');
+      addLog(`Skan gotowy. ${finalAnomalies.length} anomalii.`, finalAnomalies.length > 0 ? 'warning' : 'success');
+      audioCtx.close();
     } catch (err) {
       addLog("Błąd analizy", "error");
       setMode('IDLE');
@@ -262,7 +304,11 @@ const App: React.FC = () => {
         if (!monitoringRef.current) return;
         const data = new Float32Array(analyzer.frequencyBinCount);
         analyzer.getFloatFrequencyData(data);
-        const scaledFrame = detector.scaleFrame(Array.from(data).map(v => Math.pow(10, v/20) * 1000));
+        
+        // Live normalizacja (uproszczona)
+        const frameData = Array.from(data).map(v => Math.pow(10, v/20) * 1000);
+        const scaledFrame = detector.scaleFrame(frameData);
+        
         liveBufferRef.current.push(scaledFrame);
         if (liveBufferRef.current.length > detector.getWindowSize()) liveBufferRef.current.shift();
         if (liveBufferRef.current.length === detector.getWindowSize()) {
@@ -270,7 +316,7 @@ const App: React.FC = () => {
           setCurrentScore(score);
           setChartData(prev => [...prev.slice(-99), { 
             time: new Date().toLocaleTimeString([], {second:'2-digit'}), 
-            amplitude: calculateCentroid(Array.from(data).map(v => Math.pow(10, v/20) * 1000), 44100), 
+            amplitude: calculateCentroid(frameData, 44100), 
             anomalyLevel: score, 
             second: Date.now() / 1000 
           }]);
@@ -291,6 +337,7 @@ const App: React.FC = () => {
       setIsPersistent(false);
       setAnomalies([]);
       setChartData([]);
+      setDynamicThreshold(detector.getThreshold());
       addLog("Baza zresetowana", "warning");
     }
   };
@@ -330,7 +377,7 @@ const App: React.FC = () => {
                 </button>
              </div>
              <button 
-                disabled={mode === 'TRAINING' || trainingQueue.length === 0} 
+                disabled={mode !== 'IDLE' || trainingQueue.length === 0} 
                 onClick={runIncrementalTraining} 
                 className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-4 py-3 rounded-xl transition-all shadow-lg flex flex-col items-center justify-center gap-1 min-w-[100px]"
              >
@@ -340,12 +387,12 @@ const App: React.FC = () => {
            </div>
 
            <div className="flex items-center gap-2 sm:gap-3">
-              <button className="relative bg-slate-800 hover:bg-slate-700 text-indigo-400 px-4 py-3 rounded-xl text-[10px] font-black uppercase border border-slate-700 flex items-center gap-2">
+              <button disabled={mode !== 'IDLE'} className="relative bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-indigo-400 px-4 py-3 rounded-xl text-[10px] font-black uppercase border border-slate-700 flex items-center gap-2">
                 <FileAudio className="w-4 h-4" /> Skanuj Audio
                 <input type="file" accept="audio/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => e.target.files?.[0] && analyzeSingleFile(e.target.files[0])} />
               </button>
               {mode !== 'MONITORING' ? (
-                <button onClick={startLive} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-500/20 flex items-center gap-2"><Mic className="w-4 h-4" /> Live</button>
+                <button disabled={mode !== 'IDLE'} onClick={startLive} className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-500/20 flex items-center gap-2"><Mic className="w-4 h-4" /> Live</button>
               ) : (
                 <button onClick={() => { monitoringRef.current = false; setMode('IDLE'); }} className="bg-red-600 hover:bg-red-500 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase flex items-center gap-2"><Square className="w-4 h-4" /> Stop</button>
               )}
@@ -367,7 +414,7 @@ const App: React.FC = () => {
                     <p className="text-lg font-black text-white">{totalTrained}</p>
                  </div>
                  <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[8px] font-black text-slate-500 uppercase">Próg Błędu</p>
+                    <p className="text-[8px] font-black text-slate-500 uppercase">Próg Alarmu</p>
                     <p className="text-lg font-black text-emerald-400">{dynamicThreshold.toFixed(2)}</p>
                  </div>
               </div>
@@ -408,7 +455,7 @@ const App: React.FC = () => {
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
                 <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Score</p>
                 <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
-                   {mode === 'FILE_ANALYSIS' ? `${batchProgress}%` : currentScore.toFixed(2)}
+                   {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
                 </span>
               </div>
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
@@ -467,7 +514,7 @@ const App: React.FC = () => {
               </button>
               {showConsole && (
                 <div className="mt-3 h-32 bg-black/60 rounded-xl p-3 font-mono text-[9px] overflow-y-auto scrollbar-thin">
-                  {logs.map((log, i) => <div key={i} className={`text-xs ${log.type === 'warning' ? 'text-amber-400' : 'text-indigo-300'}`}>{log.message}</div>)}
+                  {logs.map((log, i) => <div key={i} className={`text-[10px] mb-1 ${log.type === 'warning' ? 'text-amber-400' : log.type === 'error' ? 'text-red-400' : 'text-indigo-300'}`}>[{log.time}] {log.message}</div>)}
                 </div>
               )}
            </div>
