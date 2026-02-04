@@ -1,0 +1,7 @@
+{
+  "name": "AudioSentinel - AI Industrial Sound Analysis",
+  "description": "An advanced industrial sound anomaly detection system using TensorFlow.js autoencoders and Gemini AI for diagnostic insights.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
