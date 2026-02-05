@@ -6,7 +6,8 @@ import {
   Zap, Volume2, FileSearch, Mic, Trash2, 
   ChevronDown, ChevronRight, Terminal, Database,
   SlidersHorizontal, Save, RefreshCw, BarChart3, Cpu, AlertTriangle,
-  HardDrive, FolderOpen, Sliders, FileText, Printer, X, MonitorDown
+  HardDrive, FolderOpen, Sliders, FileText, Printer, X, MonitorDown,
+  Info, ExternalLink
 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import { Anomaly, AudioChartData, ModelConfig } from './types';
@@ -46,6 +47,7 @@ const App: React.FC = () => {
   const [sensitivity, setSensitivity] = useState(detector.getSensitivity());
   const [dynamicThreshold, setDynamicThreshold] = useState(detector.getThreshold());
   const [installPrompt, setInstallPrompt] = useState<any>(null);
+  const [isStandalone, setIsStandalone] = useState(false);
   
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showConsole, setShowConsole] = useState(false);
@@ -64,13 +66,15 @@ const App: React.FC = () => {
         setTfBackend(detector.getBackendName());
         setIsPersistent(detector.getIsLoadedFromStorage());
         setTotalTrained(detector.getTotalFiles());
-        setStatus('Engine Desktop Gotowy');
+        setStatus('System Desktop Aktywny');
+        setIsStandalone(window.matchMedia('(display-mode: standalone)').matches);
+        
         memInterval = setInterval(() => {
           const mem = detector.getMemInfo();
           setRamUsage(mem ? mem.numBytes : 0);
-        }, 2000);
+        }, 3000);
       } catch (err) {
-        setStatus('Błąd Silnika AI');
+        setStatus('Błąd GPU Engine');
       }
     };
     checkStatus();
@@ -126,19 +130,18 @@ const App: React.FC = () => {
   };
 
   const decodeAudioSafe = async (arrayBuffer: ArrayBuffer): Promise<AudioBuffer> => {
-    // OfflineAudioContext jest stabilniejszy dla dekodowania seryjnego
     const offlineCtx = new OfflineAudioContext(1, 100, 44100);
     try {
       return await offlineCtx.decodeAudioData(arrayBuffer);
     } catch (e: any) {
-      throw new Error(`Format audio nieobsługiwany lub uszkodzony: ${e.message}`);
+      throw new Error(`Format audio nieobsługiwany: ${e.message}`);
     }
   };
 
   const runIncrementalTraining = async () => {
     if (trainingQueue.length === 0) return;
     setMode('TRAINING');
-    setStatus('Uczenie AI...');
+    setStatus('Proces uczenia...');
     try {
       for (let i = 0; i < trainingQueue.length; i++) {
         const item = trainingQueue[i];
@@ -148,7 +151,7 @@ const App: React.FC = () => {
           const audioBuffer = await decodeAudioSafe(arrayBuffer);
           const rawChannelData = audioBuffer.getChannelData(0);
           
-          if (rawChannelData.length < 512) throw new Error("Plik zbyt krótki");
+          if (rawChannelData.length < 256) throw new Error("Plik pusty");
 
           const rawTensor = tf.tensor1d(rawChannelData);
           const { normalized: audioTensor, rms } = normalizeTensor(rawTensor);
@@ -156,7 +159,7 @@ const App: React.FC = () => {
 
           if (rms < 0.0001) {
              audioTensor.dispose();
-             throw new Error("Wykryto ciszę - pominięto");
+             throw new Error("Cisza - pominięto");
           }
 
           const frameStep = Math.max(1, Math.floor(audioBuffer.sampleRate * 0.015));
@@ -172,12 +175,14 @@ const App: React.FC = () => {
         } catch (err: any) {
           addLog(`${item.file.name}: ${err.message}`, 'error');
         }
-        await tf.nextFrame(); 
+        // Wymuszone oddanie kontroli do UI/Systemu po każdym pliku
+        await tf.nextFrame();
+        await new Promise(r => setTimeout(r, 10)); 
       }
     } finally {
       setTrainingQueue([]);
       setMode('IDLE');
-      setStatus('System Gotowy');
+      setStatus('Gotowy');
       setTotalTrained(detector.getTotalFiles());
       setDynamicThreshold(detector.getThreshold());
     }
@@ -206,6 +211,7 @@ const App: React.FC = () => {
       const numFrames = spectrogramData.length;
       const allScores: number[] = [];
       const preliminaryPoints: any[] = [];
+      
       for (let i = 0; i <= numFrames - windowSize; i++) {
         const rawSequence = spectrogramData.slice(i, i + windowSize);
         const sequence = rawSequence.map(frame => detector.scaleFrame(frame.slice(0, 128)));
@@ -217,7 +223,9 @@ const App: React.FC = () => {
         const hz = den < 0.0001 ? 0 : num / den;
         allScores.push(score);
         preliminaryPoints.push({ timestamp: (i + windowSize) * frameDurationSec, hz, score });
-        if (i % 80 === 0) {
+        
+        // Częstsze przerywanie pętli zapobiega HUNG
+        if (i % 50 === 0) {
           setBatchProgress(Math.round((i / (numFrames - windowSize)) * 100));
           await tf.nextFrame();
         }
@@ -244,9 +252,9 @@ const App: React.FC = () => {
       });
       setChartData(finalChartData);
       setAnomalies(detectedSegments.filter(s => s.durationSeconds >= 0.2));
-      setMode('IDLE'); setStatus('Analiza zakończona');
+      setMode('IDLE'); setStatus('Zakończono');
     } catch (err: any) {
-      addLog(`Błąd analizy: ${err.message}`, "error");
+      addLog(`Błąd GPU: ${err.message}`, "error");
       setMode('IDLE');
     }
   };
@@ -254,7 +262,7 @@ const App: React.FC = () => {
   const startLive = async () => {
     try {
       setMode('MONITORING');
-      setStatus('LIVE MONITORING');
+      setStatus('LIVE SCAN');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -281,17 +289,17 @@ const App: React.FC = () => {
       };
       loop();
     } catch (err) {
-      addLog("Mikrofon błąd dostępu", "error");
+      addLog("Brak mikrofonu", "error");
       setMode('IDLE');
     }
   };
 
   const resetModel = async () => {
-    if (window.confirm("Usunąć wszystkie wzorce z bazy AI?")) {
+    if (window.confirm("Zresetować bazę wiedzy AI?")) {
       await detector.clearKnowledge();
       setTotalTrained(0); setIsPersistent(false);
       setAnomalies([]); setChartData([]);
-      addLog("Baza AI została zresetowana", "warning");
+      addLog("Baza wyczyszczona", "warning");
     }
   };
 
@@ -304,7 +312,7 @@ const App: React.FC = () => {
               <BrainCircuit className="w-8 h-8" />
             </div>
             <div className="flex-1">
-              <h1 className="text-2xl sm:text-3xl font-black tracking-tighter italic uppercase leading-none">AUDIO<span className="text-indigo-400">SENTINEL</span> <span className="text-xs align-top opacity-50">PRO DESKTOP</span></h1>
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tighter italic uppercase leading-none">AUDIO<span className="text-indigo-400">SENTINEL</span> <span className="text-xs align-top opacity-50">DESKTOP SYSTEM</span></h1>
               <div className="flex flex-wrap items-center gap-2 mt-2">
                    <div className="flex items-center gap-1.5 bg-slate-900/80 px-2 py-1 rounded-lg border border-slate-800">
                       <span className={`w-2 h-2 rounded-full ${mode !== 'IDLE' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-700'}`}></span>
@@ -312,19 +320,19 @@ const App: React.FC = () => {
                    </div>
                    <div className="flex items-center gap-1.5 bg-indigo-500/10 px-2 py-1 rounded-lg border border-indigo-500/20">
                       <Cpu className="w-3 h-3 text-indigo-400" />
-                      <span className="text-[10px] font-black uppercase text-indigo-400">{tfBackend} CORE</span>
+                      <span className="text-[10px] font-black uppercase text-indigo-400">{tfBackend} ENGINE</span>
                    </div>
-                   {installPrompt && (
-                     <button onClick={handleInstall} className="flex items-center gap-1.5 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20 text-emerald-400 animate-bounce">
-                        <MonitorDown className="w-3 h-3" />
-                        <span className="text-[10px] font-black uppercase">Instaluj System</span>
-                     </button>
-                   )}
               </div>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-3 bg-slate-900/60 p-2 sm:p-3 rounded-2xl border border-slate-800 shadow-2xl backdrop-blur-xl w-full xl:w-auto">
+             {!isStandalone && installPrompt && (
+                <button onClick={handleInstall} className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase shadow-lg animate-bounce transition-all">
+                  <MonitorDown className="w-4 h-4" /> Zainstaluj na Pulpicie
+                </button>
+             )}
+
              <div className="flex items-center gap-2 bg-slate-800/50 p-2 rounded-2xl border border-slate-700/50">
                <div className="flex flex-col gap-1">
                   <button className="relative bg-emerald-600/10 hover:bg-emerald-600 text-emerald-500 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all flex items-center gap-2 border border-emerald-500/30">
@@ -342,7 +350,7 @@ const App: React.FC = () => {
                   className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-4 py-3 rounded-xl transition-all shadow-lg flex flex-col items-center justify-center gap-1 min-w-[100px]"
                >
                   {mode === 'TRAINING' ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
-                  <span className="text-[9px] font-black uppercase">Aktualizuj AI</span>
+                  <span className="text-[9px] font-black uppercase">Trenuj AI</span>
                </button>
              </div>
 
@@ -369,13 +377,23 @@ const App: React.FC = () => {
           </div>
         </header>
 
+        {!isStandalone && (
+           <div className="mb-6 bg-amber-500/10 border border-amber-500/30 p-4 rounded-3xl flex items-center gap-4">
+              <Info className="text-amber-500 w-6 h-6 shrink-0" />
+              <div className="flex-1">
+                 <p className="text-xs font-bold text-amber-200 uppercase">Wykryto pracę w przeglądarce - ryzyko błędu "HUNG"</p>
+                 <p className="text-[10px] text-amber-500/80 font-medium">Aby uzyskać pełną stabilność GPU i uniknąć zawieszania analizy, zainstaluj aplikację klikając ikonę w pasku adresu lub przycisk powyżej.</p>
+              </div>
+           </div>
+        )}
+
         <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-20">
           <div className="lg:col-span-3 space-y-6">
              <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
-                <h2 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mb-4"><BarChart3 className="w-4 h-4" /> Parametry Silnika</h2>
+                <h2 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mb-4"><BarChart3 className="w-4 h-4" /> Silnik Diagnostyczny</h2>
                 <div className="grid grid-cols-2 gap-4">
                    <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-                      <p className="text-[8px] font-black text-slate-500 uppercase">Obiekty AI</p>
+                      <p className="text-[8px] font-black text-slate-500 uppercase">Baza AI</p>
                       <p className="text-lg font-black text-white">{totalTrained}</p>
                    </div>
                    <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
@@ -385,7 +403,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="mt-6 pt-6 border-t border-slate-800">
                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5"><Sliders className="w-3.5 h-3.5" /> Czułość Sensora</p>
+                      <p className="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5"><Sliders className="w-3.5 h-3.5" /> Sensor Czułości</p>
                       <span className="text-[10px] font-mono text-indigo-400 font-black">{sensitivity}</span>
                    </div>
                    <input type="range" min="1" max="10" step="0.5" value={sensitivity} onChange={(e) => { const val = parseFloat(e.target.value); setSensitivity(val); detector.setSensitivity(val); setDynamicThreshold(detector.getThreshold()); }} className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" />
@@ -393,7 +411,7 @@ const App: React.FC = () => {
              </div>
              
              <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[300px] flex flex-col">
-                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-4"><Upload className="w-4 h-4 text-indigo-500" /> Batch Processing ({trainingQueue.length})</h2>
+                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-4"><Upload className="w-4 h-4 text-indigo-500" /> Kolejka Przetwarzania ({trainingQueue.length})</h2>
                 <div className="flex-1 overflow-y-auto space-y-1 pr-1 scrollbar-thin text-[9px] uppercase font-mono">
                   {trainingQueue.map((item, idx) => (
                     <div key={idx} className="bg-slate-950/30 border border-slate-800/50 p-2 rounded-lg flex items-center justify-between">
@@ -408,22 +426,22 @@ const App: React.FC = () => {
           <div className="lg:col-span-6 flex flex-col gap-6">
              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Obciążenie</p>
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Status GPU</p>
                   <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
                      {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
                   </span>
                 </div>
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Hz Średnie</p>
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Dominanta Hz</p>
                   <p className="text-xl font-black text-white">{chartData.length > 0 ? chartData[chartData.length-1].amplitude.toFixed(0) : '0'}</p>
                 </div>
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Incydenty</p>
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Alertów</p>
                   <p className="text-xl font-black text-white">{anomalies.length}</p>
                 </div>
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">System Plików</p>
-                  <p className="text-xl font-black text-emerald-400">Active</p>
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Architektura</p>
+                  <p className="text-xl font-black text-emerald-400">{isStandalone ? 'PWA' : 'WEB'}</p>
                 </div>
              </div>
 
@@ -442,7 +460,7 @@ const App: React.FC = () => {
 
           <div className="lg:col-span-3 flex flex-col gap-6">
              <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[450px] flex flex-col shadow-xl">
-                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Rejestr Wykryć</h2>
+                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Logi Analizy</h2>
                 <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin">
                   {anomalies.map((a) => (
                     <div key={a.id} className="p-3 rounded-2xl border border-slate-800 bg-slate-950/60 hover:border-indigo-500/60 cursor-pointer" onClick={() => seekTo(a.offsetSeconds || 0)}>
@@ -450,7 +468,7 @@ const App: React.FC = () => {
                           <span className={`text-[8px] font-black uppercase px-1 rounded text-white ${a.severity === 'High' ? 'bg-red-500' : 'bg-amber-500'}`}>{a.severity}</span>
                           <span className="text-[10px] font-mono text-slate-500">{a.offsetSeconds?.toFixed(2)}s</span>
                       </div>
-                      <p className="text-[10px] text-slate-400 font-bold">Nieregularność: x{(a.intensity).toFixed(1)}</p>
+                      <p className="text-[10px] text-slate-400 font-bold">Współczynnik: x{(a.intensity).toFixed(1)}</p>
                       <p className="text-[9px] text-indigo-400/80 mt-1 uppercase font-black italic">Trwanie: {a.durationSeconds.toFixed(2)}s</p>
                     </div>
                   ))}
@@ -459,7 +477,7 @@ const App: React.FC = () => {
 
              <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-4 flex flex-col">
                 <button onClick={() => setShowConsole(!showConsole)} className="flex items-center justify-between w-full text-[10px] font-black uppercase text-slate-500">
-                  <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Debuger GPU</div>
+                  <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Konsola Engine</div>
                   {showConsole ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </button>
                 {showConsole && (
@@ -479,10 +497,10 @@ const App: React.FC = () => {
           <div className="max-w-[210mm] mx-auto w-full flex flex-col gap-6">
             <div className="flex justify-between items-center print:hidden">
               <button onClick={() => setShowReportModal(false)} className="flex items-center gap-2 text-slate-400 hover:text-white transition-all uppercase text-[10px] font-black">
-                <X className="w-5 h-5" /> Wróć
+                <X className="w-5 h-5" /> Powrót
               </button>
               <button onClick={() => window.print()} className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl flex items-center gap-2 uppercase text-xs font-black shadow-xl">
-                <Printer className="w-5 h-5" /> Eksportuj PDF
+                <Printer className="w-5 h-5" /> PDF
               </button>
             </div>
             <TechnicalReportView anomalies={anomalies} totalTrained={totalTrained} sensitivity={sensitivity} threshold={dynamicThreshold} />
@@ -493,10 +511,10 @@ const App: React.FC = () => {
       {showSettings && (
         <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[500] flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-xl p-8 shadow-2xl">
-            <h2 className="text-xl font-black uppercase text-white mb-8">Administracja AI</h2>
+            <h2 className="text-xl font-black uppercase text-white mb-8">Administracja Systemu</h2>
             <div className="space-y-6">
-               <button onClick={() => detector.exportModel()} className="w-full bg-emerald-600 p-3 rounded-xl font-black uppercase text-white hover:bg-emerald-500 transition-all">Pobierz Wagi Modelu</button>
-               <button onClick={resetModel} className="w-full border border-red-900/50 text-red-500 p-3 rounded-xl font-black uppercase hover:bg-red-950 transition-all">Wyczyść Bazę IndexedDB</button>
+               <button onClick={() => detector.exportModel()} className="w-full bg-emerald-600 p-3 rounded-xl font-black uppercase text-white hover:bg-emerald-500 transition-all">Zapisz Bazę Modelu</button>
+               <button onClick={resetModel} className="w-full border border-red-900/50 text-red-500 p-3 rounded-xl font-black uppercase hover:bg-red-950 transition-all">Usuń Dane AI</button>
                <button onClick={() => setShowSettings(false)} className="w-full text-slate-500 font-black uppercase py-2">Zamknij</button>
             </div>
           </div>

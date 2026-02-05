@@ -7,9 +7,9 @@ const STORAGE_PATH = 'indexeddb://sentinel-model-v1';
 class AnomalyDetector {
   private model: tf.LayersModel | null = null;
   private config: ModelConfig = {
-    epochs: 5,
+    epochs: 1, // Zawsze 1 epoka przy online learningu dla stabilności
     learningRate: 0.001,
-    batchSize: 32,
+    batchSize: 8, // Zmniejszone z 16/32, aby uniknąć HUNG na GPU
     latentDim: 24
   };
   private threshold: number = 3.5; 
@@ -25,6 +25,7 @@ class AnomalyDetector {
 
   private async init() {
     try {
+      // Optymalizacja pod Desktop
       try {
         await tf.setBackend('webgpu');
       } catch (e) {
@@ -35,8 +36,10 @@ class AnomalyDetector {
 
       if (tf.getBackend() === 'webgl') {
         try {
-          tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 256 * 1024); 
+          // Agresywne limity zapobiegające blokowaniu GPU
+          tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 128 * 1024); 
           tf.env().set('WEBGL_FLUSH_THRESHOLD', 1);
+          tf.env().set('WEBGL_CPU_FORWARD', false);
         } catch (e) {}
       }
       
@@ -134,9 +137,10 @@ class AnomalyDetector {
 
     try {
       if (label === 'Normal') {
+        // Mniejszy batchSize (8) pozwala uniknąć HUNG na GPU
         await this.model.fit(normXs, normXs, { 
           epochs: 1, 
-          batchSize: 16, 
+          batchSize: this.config.batchSize, 
           verbose: 0,
           shuffle: true 
         });
@@ -199,9 +203,7 @@ class AnomalyDetector {
           threshold: this.threshold,
           sensitivity: this.sensitivity
         }));
-      } catch (e) {
-        console.warn("Save failed", e);
-      }
+      } catch (e) {}
     }
   }
 
