@@ -7,9 +7,9 @@ const STORAGE_PATH = 'indexeddb://sentinel-model-v1';
 class AnomalyDetector {
   private model: tf.LayersModel | null = null;
   private config: ModelConfig = {
-    epochs: 1, // Zawsze 1 epoka przy online learningu dla stabilności
+    epochs: 1, 
     learningRate: 0.001,
-    batchSize: 8, // Zmniejszone z 16/32, aby uniknąć HUNG na GPU
+    batchSize: 8, 
     latentDim: 24
   };
   private threshold: number = 3.5; 
@@ -25,7 +25,6 @@ class AnomalyDetector {
 
   private async init() {
     try {
-      // Optymalizacja pod Desktop
       try {
         await tf.setBackend('webgpu');
       } catch (e) {
@@ -36,7 +35,6 @@ class AnomalyDetector {
 
       if (tf.getBackend() === 'webgl') {
         try {
-          // Agresywne limity zapobiegające blokowaniu GPU
           tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 128 * 1024); 
           tf.env().set('WEBGL_FLUSH_THRESHOLD', 1);
           tf.env().set('WEBGL_CPU_FORWARD', false);
@@ -137,7 +135,6 @@ class AnomalyDetector {
 
     try {
       if (label === 'Normal') {
-        // Mniejszy batchSize (8) pozwala uniknąć HUNG na GPU
         await this.model.fit(normXs, normXs, { 
           epochs: 1, 
           batchSize: this.config.batchSize, 
@@ -148,7 +145,13 @@ class AnomalyDetector {
       }
 
       const predictions = this.model.predict(normXs) as tf.Tensor;
-      const errors = tf.losses.meanSquaredError(normXs, predictions).mean(1);
+      
+      // Naprawa błędu AXIS: Obliczamy MSE ręcznie na osiach 1 i 2 (wymiar czasowy i cechy)
+      // aby otrzymać błąd dla każdego elementu w batchu (oś 0).
+      const diff = tf.sub(normXs, predictions);
+      const squaredDiff = tf.square(diff);
+      const errors = squaredDiff.mean([1, 2]); // Redukujemy wymiar [Batch, Window, Features] -> [Batch]
+      
       const errorData = await errors.data();
       const avgError = (Array.from(errorData).reduce((a, b) => a + b, 0) / errorData.length) * 1000;
       
@@ -161,6 +164,8 @@ class AnomalyDetector {
       }
 
       predictions.dispose();
+      diff.dispose();
+      squaredDiff.dispose();
       errors.dispose();
       
       await this.persist();
@@ -179,7 +184,11 @@ class AnomalyDetector {
     const divScalar = tf.scalar(255);
     const normInput = input.div(divScalar);
     const output = this.model.predict(normInput) as tf.Tensor;
-    const errorTensor = tf.losses.meanSquaredError(normInput, output);
+    
+    // Ręczne obliczanie błędu MSE dla pojedynczej sekwencji (wynik to skalar)
+    const diff = tf.sub(normInput, output);
+    const squaredDiff = tf.square(diff);
+    const errorTensor = squaredDiff.mean();
     
     const data = await errorTensor.data();
     const score = data[0] * 1000;
@@ -188,6 +197,8 @@ class AnomalyDetector {
     normInput.dispose();
     divScalar.dispose();
     output.dispose();
+    diff.dispose();
+    squaredDiff.dispose();
     errorTensor.dispose();
 
     return { score };

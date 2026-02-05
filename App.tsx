@@ -151,7 +151,7 @@ const App: React.FC = () => {
           const audioBuffer = await decodeAudioSafe(arrayBuffer);
           const rawChannelData = audioBuffer.getChannelData(0);
           
-          if (rawChannelData.length < 256) throw new Error("Plik pusty");
+          if (rawChannelData.length < 512) throw new Error("Plik zbyt krótki do analizy");
 
           const rawTensor = tf.tensor1d(rawChannelData);
           const { normalized: audioTensor, rms } = normalizeTensor(rawTensor);
@@ -166,8 +166,13 @@ const App: React.FC = () => {
           const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
           const magnitudes = tf.abs(spectrogram);
           const spectrogramData = await magnitudes.array() as number[][];
-          const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
           
+          if (spectrogramData.length < detector.getWindowSize()) {
+            audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
+            throw new Error("Zbyt krótki czas nagrania");
+          }
+
+          const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
           await detector.trainOnFile(frames, item.label);
           
           audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
@@ -175,7 +180,6 @@ const App: React.FC = () => {
         } catch (err: any) {
           addLog(`${item.file.name}: ${err.message}`, 'error');
         }
-        // Wymuszone oddanie kontroli do UI/Systemu po każdym pliku
         await tf.nextFrame();
         await new Promise(r => setTimeout(r, 10)); 
       }
@@ -198,6 +202,9 @@ const App: React.FC = () => {
       const arrayBuffer = await file.arrayBuffer();
       const audioBuffer = await decodeAudioSafe(arrayBuffer);
       const rawChannelData = audioBuffer.getChannelData(0);
+
+      if (rawChannelData.length < 512) throw new Error("Plik uszkodzony lub zbyt krótki");
+
       const rawTensor = tf.tensor1d(rawChannelData);
       const { normalized: audioTensor } = normalizeTensor(rawTensor);
       rawTensor.dispose();
@@ -208,7 +215,10 @@ const App: React.FC = () => {
       const magnitudes = tf.abs(spectrogram);
       const spectrogramData = await magnitudes.array() as number[][];
       audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
+      
       const numFrames = spectrogramData.length;
+      if (numFrames < windowSize) throw new Error("Plik musi mieć co najmniej 0.2s długości");
+
       const allScores: number[] = [];
       const preliminaryPoints: any[] = [];
       
@@ -224,8 +234,7 @@ const App: React.FC = () => {
         allScores.push(score);
         preliminaryPoints.push({ timestamp: (i + windowSize) * frameDurationSec, hz, score });
         
-        // Częstsze przerywanie pętli zapobiega HUNG
-        if (i % 50 === 0) {
+        if (i % 40 === 0) {
           setBatchProgress(Math.round((i / (numFrames - windowSize)) * 100));
           await tf.nextFrame();
         }
@@ -254,7 +263,7 @@ const App: React.FC = () => {
       setAnomalies(detectedSegments.filter(s => s.durationSeconds >= 0.2));
       setMode('IDLE'); setStatus('Zakończono');
     } catch (err: any) {
-      addLog(`Błąd GPU: ${err.message}`, "error");
+      addLog(`Błąd analizy: ${err.message}`, "error");
       setMode('IDLE');
     }
   };
