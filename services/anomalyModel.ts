@@ -25,25 +25,19 @@ class AnomalyDetector {
 
   private async init() {
     try {
-      // PRÓBA WebGPU - Standard desktopowy w nowoczesnych przeglądarkach
       try {
         await tf.setBackend('webgpu');
-        console.log("Używam nowoczesnego silnika WebGPU");
       } catch (e) {
-        console.warn("WebGPU niedostępny, przełączam na WebGL");
         await tf.setBackend('webgl');
       }
 
       await tf.ready();
 
-      // Optymalizacje zapobiegające zwisom (HUNG) - ustawiane po zainicjowaniu backendu
       if (tf.getBackend() === 'webgl') {
         try {
-          // Ustawiamy tylko zarejestrowane flagi
           tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 256 * 1024); 
-        } catch (e) {
-          console.warn("Nie udało się ustawić zaawansowanych flag WebGL");
-        }
+          tf.env().set('WEBGL_FLUSH_THRESHOLD', 1);
+        } catch (e) {}
       }
       
       try {
@@ -66,8 +60,7 @@ class AnomalyDetector {
         this.sensitivity = parsed.sensitivity || 5.0;
       }
     } catch (e) {
-      console.error("Inicjalizacja błąd krytyczny:", e);
-      // Fallback do CPU w razie całkowitej awarii akceleracji
+      console.error("Inicjalizacja błąd:", e);
       await tf.setBackend('cpu');
     }
   }
@@ -136,7 +129,8 @@ class AnomalyDetector {
     if (sequences.length === 0) return { error: 0 };
 
     const xs = tf.tensor3d(sequences);
-    const normXs = xs.div(tf.scalar(255));
+    const divScalar = tf.scalar(255);
+    const normXs = xs.div(divScalar);
 
     try {
       if (label === 'Normal') {
@@ -170,6 +164,7 @@ class AnomalyDetector {
     } finally {
       xs.dispose();
       normXs.dispose();
+      divScalar.dispose();
     }
   }
 
@@ -177,7 +172,8 @@ class AnomalyDetector {
     if (!this.model) return { score: 0 };
     
     const input = tf.tensor3d([sequence]);
-    const normInput = input.div(tf.scalar(255));
+    const divScalar = tf.scalar(255);
+    const normInput = input.div(divScalar);
     const output = this.model.predict(normInput) as tf.Tensor;
     const errorTensor = tf.losses.meanSquaredError(normInput, output);
     
@@ -186,6 +182,7 @@ class AnomalyDetector {
 
     input.dispose();
     normInput.dispose();
+    divScalar.dispose();
     output.dispose();
     errorTensor.dispose();
 
@@ -203,7 +200,7 @@ class AnomalyDetector {
           sensitivity: this.sensitivity
         }));
       } catch (e) {
-        console.warn("Zapis bazy AI nieudany", e);
+        console.warn("Save failed", e);
       }
     }
   }
