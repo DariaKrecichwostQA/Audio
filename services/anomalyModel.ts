@@ -25,7 +25,27 @@ class AnomalyDetector {
 
   private async init() {
     try {
+      // PRÓBA WebGPU - Standard desktopowy w nowoczesnych przeglądarkach
+      try {
+        await tf.setBackend('webgpu');
+        console.log("Używam nowoczesnego silnika WebGPU");
+      } catch (e) {
+        console.warn("WebGPU niedostępny, przełączam na WebGL");
+        await tf.setBackend('webgl');
+      }
+
       await tf.ready();
+
+      // Optymalizacje zapobiegające zwisom (HUNG) - ustawiane po zainicjowaniu backendu
+      if (tf.getBackend() === 'webgl') {
+        try {
+          // Ustawiamy tylko zarejestrowane flagi
+          tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 256 * 1024); 
+        } catch (e) {
+          console.warn("Nie udało się ustawić zaawansowanych flag WebGL");
+        }
+      }
+      
       try {
         this.model = await tf.loadLayersModel(STORAGE_PATH);
         this.model.compile({
@@ -46,7 +66,9 @@ class AnomalyDetector {
         this.sensitivity = parsed.sensitivity || 5.0;
       }
     } catch (e) {
-      console.error("Inicjalizacja błąd:", e);
+      console.error("Inicjalizacja błąd krytyczny:", e);
+      // Fallback do CPU w razie całkowitej awarii akceleracji
+      await tf.setBackend('cpu');
     }
   }
 
@@ -76,43 +98,26 @@ class AnomalyDetector {
   public getBackendName() { return tf.getBackend().toUpperCase(); }
   public getIsLoadedFromStorage() { return this.isModelLoaded; }
 
-  /**
-   * PRZETWARZANIE WIDMA Z PODBICIEM WYSOKICH TONÓW
-   */
   public scaleFrame(frame: number[]) {
     const len = frame.length;
     return frame.map((v, i) => {
-      // 1. FILTR PRE-EMFAZY: Progresywne wzmocnienie wysokich częstotliwości
-      // Niskie biny zostają bez zmian, najwyższe są podbite 2.5-krotnie.
-      // To pozwala modelowi "zauważyć" subtelne piski łożysk.
       const boost = 1.0 + (i / len) * 1.5;
       const boostedVal = v * boost;
-
-      // 2. Redukcja statycznego szumu tła (noise floor)
       const cleaned = Math.max(0, boostedVal - 0.08);
-
-      // 3. Logarytmiczna kompresja dynamiki (Mel-like behavior)
-      // Skupiamy się na zmianach energii, a nie tylko na głośności bezwzględnej.
       const compressed = Math.log10(1 + cleaned * 10) / Math.log10(101);
-      
       return Math.min(255, Math.max(0, compressed * 255));
     });
   }
 
   public calculateRobustThreshold(scores: number[]) {
     if (scores.length < 10) return 3.5;
-    
     const sorted = [...scores].sort((a, b) => a - b);
-    const baselineIndex = Math.floor(sorted.length * 0.65);
-    const baseline = sorted[baselineIndex];
-    
+    const baseline = sorted[Math.floor(sorted.length * 0.65)];
     const absoluteDeviations = scores.map(s => Math.abs(s - baseline));
     const sortedDeviations = [...absoluteDeviations].sort((a, b) => a - b);
     const mad = sortedDeviations[Math.floor(sortedDeviations.length / 2)];
-    
     const multiplier = 6.0 - (this.sensitivity * 0.4);
     const sigmaEst = mad * 1.4826;
-    
     return Math.max(0.5, baseline + (multiplier * sigmaEst));
   }
 
@@ -136,8 +141,8 @@ class AnomalyDetector {
     try {
       if (label === 'Normal') {
         await this.model.fit(normXs, normXs, { 
-          epochs: 5, 
-          batchSize: 32, 
+          epochs: 1, 
+          batchSize: 16, 
           verbose: 0,
           shuffle: true 
         });
@@ -147,21 +152,20 @@ class AnomalyDetector {
       const predictions = this.model.predict(normXs) as tf.Tensor;
       const errors = tf.losses.meanSquaredError(normXs, predictions).mean(1);
       const errorData = await errors.data();
-      const typedErrorData = errorData as Float32Array;
-      const avgError = (Array.from(typedErrorData).reduce((a: number, b: number) => a + b, 0) / typedErrorData.length) * 1000;
+      const avgError = (Array.from(errorData).reduce((a, b) => a + b, 0) / errorData.length) * 1000;
       
       if (label === 'Normal') {
-        for(let i = 0; i < typedErrorData.length; i += 2) {
-          this.errorStats.push((typedErrorData[i] as number) * 1000);
+        for(let i = 0; i < errorData.length; i += 2) {
+          this.errorStats.push(errorData[i] * 1000);
         }
-        if (this.errorStats.length > 5000) this.errorStats = this.errorStats.slice(-5000);
+        if (this.errorStats.length > 1000) this.errorStats = this.errorStats.slice(-1000);
         this.updateThreshold();
       }
 
       predictions.dispose();
       errors.dispose();
       
-      this.persist();
+      await this.persist();
       return { error: avgError };
     } finally {
       xs.dispose();
@@ -171,25 +175,36 @@ class AnomalyDetector {
 
   public async predict(sequence: number[][]) {
     if (!this.model) return { score: 0 };
-    return tf.tidy(() => {
-      const input = tf.tensor3d([sequence]);
-      const normInput = input.div(tf.scalar(255));
-      const output = this.model!.predict(normInput) as tf.Tensor;
-      const error = tf.losses.meanSquaredError(normInput, output);
-      const data = error.dataSync() as Float32Array;
-      return { score: (data[0] as number) * 1000 };
-    });
+    
+    const input = tf.tensor3d([sequence]);
+    const normInput = input.div(tf.scalar(255));
+    const output = this.model.predict(normInput) as tf.Tensor;
+    const errorTensor = tf.losses.meanSquaredError(normInput, output);
+    
+    const data = await errorTensor.data();
+    const score = data[0] * 1000;
+
+    input.dispose();
+    normInput.dispose();
+    output.dispose();
+    errorTensor.dispose();
+
+    return { score };
   }
 
   private async persist() {
     if (this.model) {
-      await this.model.save(STORAGE_PATH);
-      localStorage.setItem('sentinel_stats', JSON.stringify({
-        errorStats: this.errorStats,
-        totalProcessedFiles: this.totalProcessedFiles,
-        threshold: this.threshold,
-        sensitivity: this.sensitivity
-      }));
+      try {
+        await this.model.save(STORAGE_PATH);
+        localStorage.setItem('sentinel_stats', JSON.stringify({
+          errorStats: this.errorStats,
+          totalProcessedFiles: this.totalProcessedFiles,
+          threshold: this.threshold,
+          sensitivity: this.sensitivity
+        }));
+      } catch (e) {
+        console.warn("Zapis bazy AI nieudany", e);
+      }
     }
   }
 

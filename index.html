@@ -1,36 +1,36 @@
 
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AudioSentinel AI</title>
+  <title>AudioSentinel AI - Desktop Engine</title>
+  <meta name="theme-color" content="#0f172a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-        sans-serif;
+      background: #020617;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
       -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
+      overflow-x: hidden;
     }
-    .scrollbar-thin::-webkit-scrollbar {
-      width: 4px;
-    }
-    .scrollbar-thin::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    .scrollbar-thin::-webkit-scrollbar-thumb {
-      background: #1e293b;
-      border-radius: 10px;
-    }
+    .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
     @keyframes glow {
       0%, 100% { box-shadow: 0 0 10px rgba(79, 70, 229, 0.2); }
       50% { box-shadow: 0 0 20px rgba(79, 70, 229, 0.4); }
     }
-    .animate-glow {
-      animation: glow 3s ease-in-out infinite;
+    .animate-glow { animation: glow 3s ease-in-out infinite; }
+    
+    /* Styl dla wersji zainstalowanej */
+    @media (display-mode: standalone) {
+      .desktop-only-padding { padding-top: 20px; }
+      .hide-on-desktop { display: none; }
     }
   </style>
 <script type="importmap">

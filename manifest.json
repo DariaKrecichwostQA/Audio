@@ -1,0 +1,18 @@
+
+{
+  "name": "AudioSentinel Desktop AI",
+  "short_name": "AudioSentinel",
+  "description": "Profesjonalna analiza dźwięku maszyn przy użyciu GPU",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/2103/2103633.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
