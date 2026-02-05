@@ -94,17 +94,10 @@ const App: React.FC = () => {
       const mean = square.mean();
       const rms = tf.sqrt(mean);
       const rmsVal = rms.dataSync()[0];
-      
-      // Target RMS: -24dB (0.063) - bezpieczniejszy poziom dla industrialnych nagrań
       const targetRms = 0.063;
       const gain = targetRms / (rmsVal + 1e-8);
       const gainDb = 20 * Math.log10(gain);
-      
-      // Dodatkowo: Prosty Peak Limiter, aby uniknąć clippingu powyżej 0.95
-      return {
-        normalized: tensor.mul(gain).clipByValue(-0.95, 0.95),
-        gainDb
-      };
+      return { normalized: tensor.mul(gain).clipByValue(-0.95, 0.95), gainDb };
     });
   };
 
@@ -119,12 +112,10 @@ const App: React.FC = () => {
 
   const calculateCentroid = (magnitudes: number[], sampleRate: number): number => {
     const binHz = (sampleRate / 2) / magnitudes.length;
-    let numerator = 0;
-    let denominator = 0;
+    let numerator = 0, denominator = 0;
     for (let i = 0; i < magnitudes.length; i++) {
-      const weight = magnitudes[i];
-      numerator += (i * binHz) * weight;
-      denominator += weight;
+      numerator += (i * binHz) * magnitudes[i];
+      denominator += magnitudes[i];
     }
     return denominator < 0.0001 ? 0 : numerator / denominator;
   };
@@ -134,32 +125,25 @@ const App: React.FC = () => {
     setMode('TRAINING');
     setStatus('Trenowanie...');
     const audioCtx = new AudioContext();
-    
     try {
       for (let i = 0; i < trainingQueue.length; i++) {
         const item = trainingQueue[i];
         setBatchProgress(Math.round((i / trainingQueue.length) * 100));
-        addLog(`Uczenie: ${item.file.name}...`);
-        
         try {
           const arrayBuffer = await item.file.arrayBuffer();
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
           const rawChannelData = audioBuffer.getChannelData(0);
-          
           const rawTensor = tf.tensor1d(rawChannelData);
-          const { normalized: audioTensor, gainDb } = normalizeTensor(rawTensor);
+          const { normalized: audioTensor } = normalizeTensor(rawTensor);
           rawTensor.dispose();
-
           const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
           const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
           const magnitudes = tf.abs(spectrogram);
           const spectrogramData = await magnitudes.array() as number[][];
-          
           const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
-          const { error } = await detector.trainOnFile(frames, item.label);
-          
+          await detector.trainOnFile(frames, item.label);
           audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
-          addLog(`Nauczono: ${item.file.name} (Err: ${error.toFixed(2)})`, 'success');
+          addLog(`Nauczono: ${item.file.name}`, 'success');
         } catch (err) {
           addLog(`Błąd: ${item.file.name}`, 'error');
         }
@@ -170,7 +154,6 @@ const App: React.FC = () => {
       setMode('IDLE');
       setStatus('Gotowy');
       setTotalTrained(detector.getTotalFiles());
-      setIsPersistent(true);
       setDynamicThreshold(detector.getThreshold());
       audioCtx.close();
     }
@@ -188,58 +171,58 @@ const App: React.FC = () => {
       const arrayBuffer = await file.arrayBuffer();
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
       const rawChannelData = audioBuffer.getChannelData(0);
-      
       const rawTensor = tf.tensor1d(rawChannelData);
       const { normalized: audioTensor, gainDb } = normalizeTensor(rawTensor);
       rawTensor.dispose();
-      addLog(`Auto-Leveling: ${gainDb.toFixed(1)}dB`, 'info');
 
       const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
       const frameDurationSec = frameStep / audioBuffer.sampleRate;
       const windowSize = detector.getWindowSize();
-      
       const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
       const magnitudes = tf.abs(spectrogram);
       const spectrogramData = await magnitudes.array() as number[][];
       const numFrames = spectrogramData.length;
       
       const allScores: number[] = [];
-      const preliminaryData: {timestamp: number, hz: number, score: number}[] = [];
+      const preliminaryPoints: {timestamp: number, hz: number, score: number}[] = [];
 
       for (let i = 0; i <= numFrames - windowSize; i++) {
         const rawSequence = spectrogramData.slice(i, i + windowSize);
         const sequence = rawSequence.map(frame => detector.scaleFrame(frame.slice(0, 128)));
         const { score } = await detector.predict(sequence);
         const hz = calculateCentroid(rawSequence[windowSize-1].slice(0, 128), audioBuffer.sampleRate);
-        
         allScores.push(score);
-        preliminaryData.push({ timestamp: (i + windowSize) * frameDurationSec, hz, score });
-        
-        if (i % 600 === 0) {
+        preliminaryPoints.push({ timestamp: (i + windowSize) * frameDurationSec, hz, score });
+        if (i % 800 === 0) {
           setBatchProgress(Math.round((i / numFrames) * 50));
           await tf.nextFrame();
         }
       }
 
-      const localThresh = detector.getTotalFiles() > 0 
-        ? detector.getThreshold() 
-        : detector.calculateRobustThreshold(allScores);
-        
-      setDynamicThreshold(localThresh);
+      // KOMPLEKSOWY PRÓG LOKALNY:
+      // Bierzemy pod uwagę wiedzę globalną modelu ORAZ statystykę bieżącego pliku.
+      const localAnalysisThreshold = detector.calculateRobustThreshold(allScores);
+      const finalThresh = detector.getTotalFiles() > 0 
+        ? (detector.getThreshold() * 0.7 + localAnalysisThreshold * 0.3) 
+        : localAnalysisThreshold;
+
+      setDynamicThreshold(finalThresh);
 
       const finalChartData: AudioChartData[] = [];
-      const finalAnomalies: Anomaly[] = [];
-      // Zwiększono bufor wygładzania do 15, aby uniknąć chwilowych pików
+      const detectedSegments: Anomaly[] = [];
+      
+      // ZWIĘKSZONY BUFOR WYGŁADZANIA (18 próbek)
+      // Pomaga wyeliminować regularne "cyknięcia" i skupić się na trwałej nieregularności
       let smoothScoreBuffer: number[] = [];
       let smoothHzBuffer: number[] = [];
 
-      preliminaryData.forEach((point, idx) => {
+      preliminaryPoints.forEach((point, idx) => {
         smoothScoreBuffer.push(point.score);
-        if (smoothScoreBuffer.length > 15) smoothScoreBuffer.shift();
+        if (smoothScoreBuffer.length > 18) smoothScoreBuffer.shift();
         const smoothedScore = smoothScoreBuffer.reduce((a,b)=>a+b,0) / smoothScoreBuffer.length;
 
         smoothHzBuffer.push(point.hz);
-        if (smoothHzBuffer.length > 8) smoothHzBuffer.shift();
+        if (smoothHzBuffer.length > 10) smoothHzBuffer.shift();
         const smoothedHz = smoothHzBuffer.reduce((a,b)=>a+b,0) / smoothHzBuffer.length;
 
         if (idx % 2 === 0) {
@@ -251,38 +234,43 @@ const App: React.FC = () => {
           });
         }
 
-        if (smoothedScore > localThresh) {
-          const lastAnom = finalAnomalies[finalAnomalies.length - 1];
-          // Zwiększono margines łączenia zdarzeń do 0.8s
-          if (!lastAnom || (point.timestamp - (lastAnom.offsetSeconds! + lastAnom.durationSeconds)) > 0.8) {
-            finalAnomalies.push({ 
-              id: `anom-${idx}`, 
+        // Segmentacja z progiem "Nieregularności"
+        // Musi być co najmniej 20% ponad dynamiczny próg, aby uniknąć szumów na krawędzi
+        if (smoothedScore > (finalThresh * 1.2)) {
+          const lastSeg = detectedSegments[detectedSegments.length - 1];
+          const mergeThreshold = 0.6; // Łączenie segmentów blisko siebie
+
+          if (!lastSeg || (point.timestamp - (lastSeg.offsetSeconds! + lastSeg.durationSeconds)) > mergeThreshold) {
+            detectedSegments.push({ 
+              id: `seg-${idx}`, 
               timestamp: new Date(), 
               offsetSeconds: point.timestamp, 
-              durationSeconds: frameDurationSec * 10, 
-              intensity: smoothedScore / localThresh, 
-              severity: smoothedScore > localThresh * 2.5 ? 'High' : 'Medium', 
-              description: `ZDARZENIE`, 
-              type: 'Acoustic Shift' 
+              durationSeconds: frameDurationSec, 
+              intensity: smoothedScore / finalThresh, 
+              severity: smoothedScore > finalThresh * 3.0 ? 'High' : 'Medium', 
+              description: `SEGMENT`, 
+              type: 'Atypical Pattern' 
             });
           } else {
-            lastAnom.durationSeconds = point.timestamp - lastAnom.offsetSeconds!;
-            lastAnom.intensity = Math.max(lastAnom.intensity, smoothedScore / localThresh);
+            lastSeg.durationSeconds = point.timestamp - lastSeg.offsetSeconds!;
+            lastSeg.intensity = Math.max(lastSeg.intensity, smoothedScore / finalThresh);
+            if (smoothedScore > finalThresh * 3.0) lastSeg.severity = 'High';
           }
         }
-        
-        if (idx % 1000 === 0) setBatchProgress(50 + Math.round((idx / preliminaryData.length) * 50));
+        if (idx % 1000 === 0) setBatchProgress(50 + Math.round((idx / preliminaryPoints.length) * 50));
       });
+
+      // Tylko segmenty trwające min 0.3s (ignorujemy błędy przejściowe)
+      const finalAnomalies = detectedSegments.filter(s => s.durationSeconds >= 0.3);
 
       setChartData(finalChartData);
       setAnomalies(finalAnomalies);
-      setMode('IDLE');
-      setStatus('Gotowy');
+      setMode('IDLE'); setStatus('Gotowy');
       audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
-      addLog(`Skan gotowy. ${finalAnomalies.length} anomalii.`, finalAnomalies.length > 0 ? 'warning' : 'success');
+      addLog(`Analiza zakończona. Wykryto ${finalAnomalies.length} anomalii.`, finalAnomalies.length > 0 ? 'warning' : 'success');
       audioCtx.close();
     } catch (err) {
-      addLog("Błąd analizy", "error");
+      addLog("Błąd analizy pliku", "error");
       setMode('IDLE');
     }
   };
@@ -304,11 +292,8 @@ const App: React.FC = () => {
         if (!monitoringRef.current) return;
         const data = new Float32Array(analyzer.frequencyBinCount);
         analyzer.getFloatFrequencyData(data);
-        
-        // Live normalizacja (uproszczona)
         const frameData = Array.from(data).map(v => Math.pow(10, v/20) * 1000);
         const scaledFrame = detector.scaleFrame(frameData);
-        
         liveBufferRef.current.push(scaledFrame);
         if (liveBufferRef.current.length > detector.getWindowSize()) liveBufferRef.current.shift();
         if (liveBufferRef.current.length === detector.getWindowSize()) {
@@ -333,10 +318,8 @@ const App: React.FC = () => {
   const resetModel = async () => {
     if (window.confirm("Zresetować bazę AI?")) {
       await detector.clearKnowledge();
-      setTotalTrained(0);
-      setIsPersistent(false);
-      setAnomalies([]);
-      setChartData([]);
+      setTotalTrained(0); setIsPersistent(false);
+      setAnomalies([]); setChartData([]);
       setDynamicThreshold(detector.getThreshold());
       addLog("Baza zresetowana", "warning");
     }
@@ -414,7 +397,7 @@ const App: React.FC = () => {
                     <p className="text-lg font-black text-white">{totalTrained}</p>
                  </div>
                  <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[8px] font-black text-slate-500 uppercase">Próg Alarmu</p>
+                    <p className="text-[8px] font-black text-slate-500 uppercase">Próg Detekcji</p>
                     <p className="text-lg font-black text-emerald-400">{dynamicThreshold.toFixed(2)}</p>
                  </div>
               </div>
@@ -453,7 +436,7 @@ const App: React.FC = () => {
         <div className="lg:col-span-6 flex flex-col gap-6">
            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Score</p>
+                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Live Score</p>
                 <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
                    {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
                 </span>
@@ -463,7 +446,7 @@ const App: React.FC = () => {
                 <p className="text-xl font-black text-white">{chartData.length > 0 ? chartData[chartData.length-1].amplitude.toFixed(0) : '0'} Hz</p>
               </div>
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Piki</p>
+                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Anomalie</p>
                 <p className="text-xl font-black text-white">{anomalies.length}</p>
               </div>
               <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
@@ -493,15 +476,16 @@ const App: React.FC = () => {
 
         <div className="lg:col-span-3 flex flex-col gap-6">
            <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[450px] flex flex-col shadow-xl">
-              <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Wychylenia</h2>
+              <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Wykryte Zdarzenia</h2>
               <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin">
                 {anomalies.map((a) => (
                   <div key={a.id} className="p-3 rounded-2xl border border-slate-800 bg-slate-950/60 hover:border-indigo-500/60 cursor-pointer" onClick={() => seekTo(a.offsetSeconds || 0)}>
                     <div className="flex justify-between items-center mb-1">
-                        <span className="text-[8px] font-black uppercase bg-red-500 px-1 rounded text-white">{a.severity}</span>
+                        <span className={`text-[8px] font-black uppercase px-1 rounded text-white ${a.severity === 'High' ? 'bg-red-500' : 'bg-amber-500'}`}>{a.severity}</span>
                         <span className="text-[10px] font-mono text-slate-500">{a.offsetSeconds?.toFixed(2)}s</span>
                     </div>
-                    <p className="text-[10px] text-slate-400 font-bold italic">Skok: {(a.intensity).toFixed(1)}x ponad tło</p>
+                    <p className="text-[10px] text-slate-400 font-bold">Nieregularność: x{(a.intensity).toFixed(1)}</p>
+                    <p className="text-[9px] text-indigo-400/80 mt-1 uppercase font-black italic">Trwanie: {a.durationSeconds.toFixed(2)}s</p>
                   </div>
                 ))}
               </div>
@@ -509,7 +493,7 @@ const App: React.FC = () => {
 
            <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-4 flex flex-col">
               <button onClick={() => setShowConsole(!showConsole)} className="flex items-center justify-between w-full text-[10px] font-black uppercase text-slate-500">
-                <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Konsola Diagnostyczna</div>
+                <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Logi Systemowe</div>
                 {showConsole ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
               </button>
               {showConsole && (
@@ -526,11 +510,11 @@ const App: React.FC = () => {
       {showSettings && (
         <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[500] flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-xl p-8 shadow-2xl">
-            <h2 className="text-xl font-black uppercase text-white mb-8">Ustawienia Systemu</h2>
+            <h2 className="text-xl font-black uppercase text-white mb-8">Zarządzanie AI</h2>
             <div className="space-y-6">
-               <button onClick={() => detector.exportModel()} className="w-full bg-emerald-600 p-3 rounded-xl font-black uppercase text-white">Zapisz Model</button>
-               <button onClick={resetModel} className="w-full border border-red-900 text-red-500 p-3 rounded-xl font-black uppercase">Usuń całą bazę AI</button>
-               <button onClick={() => setShowSettings(false)} className="w-full text-slate-500 font-black uppercase py-2">Zamknij</button>
+               <button onClick={() => detector.exportModel()} className="w-full bg-emerald-600 p-3 rounded-xl font-black uppercase text-white">Eksportuj Model</button>
+               <button onClick={resetModel} className="w-full border border-red-900/50 text-red-500 p-3 rounded-xl font-black uppercase">Usuń Wiedzę Modelu</button>
+               <button onClick={() => setShowSettings(false)} className="w-full text-slate-500 font-black uppercase py-2">Powrót</button>
             </div>
           </div>
         </div>

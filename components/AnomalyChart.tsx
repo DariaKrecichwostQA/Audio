@@ -3,6 +3,8 @@ import React from 'react';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, AreaChart, Area, Brush, ReferenceArea 
 } from 'recharts';
+// Add Zap import from lucide-react
+import { Zap } from 'lucide-react';
 import { AudioChartData, Anomaly } from '../types';
 
 interface Props {
@@ -13,27 +15,27 @@ interface Props {
   onPointClick?: (point: AudioChartData) => void;
 }
 
-// Added threshold to the destructured props to allow access within the tooltip component
 const CustomTooltip = ({ active, payload, threshold }: any) => {
   if (active && payload && payload.length) {
+    const isAnomaly = payload[1].value > threshold;
     return (
-      <div className="bg-slate-900 border border-slate-700 p-3 rounded-xl shadow-2xl backdrop-blur-lg border-l-4 border-l-indigo-500 z-[300]">
-        <p className="text-[10px] text-slate-400 font-black uppercase mb-2">Punkt Analizy</p>
+      <div className={`bg-slate-900 border p-3 rounded-xl shadow-2xl backdrop-blur-lg ${isAnomaly ? 'border-red-500 border-l-4' : 'border-slate-700 border-l-4 border-l-indigo-500'} z-[300]`}>
+        <p className="text-[10px] text-slate-400 font-black uppercase mb-2">Diagnostyka Czasu</p>
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between items-center gap-4">
-            <span className="text-[9px] text-slate-500 uppercase font-bold">Anomalia</span>
-            <span className={`text-xs font-mono font-black ${payload[1].value > threshold ? 'text-red-400' : 'text-indigo-400'}`}>
+            <span className="text-[9px] text-slate-500 uppercase font-bold">Współczynnik błędu</span>
+            <span className={`text-xs font-mono font-black ${isAnomaly ? 'text-red-400' : 'text-indigo-400'}`}>
               {payload[1].value.toFixed(3)}
             </span>
           </div>
           <div className="flex justify-between items-center gap-4">
-            <span className="text-[9px] text-slate-500 uppercase font-bold">Hz (Centroid)</span>
+            <span className="text-[9px] text-slate-500 uppercase font-bold">Centroid widma</span>
             <span className="text-xs font-mono font-black text-emerald-400">
               {payload[0].value.toFixed(0)} Hz
             </span>
           </div>
           <div className="text-[9px] text-slate-600 font-mono mt-1 italic">
-            Sekunda: {payload[0].payload.time}s
+            Pozycja: {payload[0].payload.time}s
           </div>
         </div>
       </div>
@@ -43,9 +45,8 @@ const CustomTooltip = ({ active, payload, threshold }: any) => {
 };
 
 const AnomalyChart: React.FC<Props> = ({ data, threshold, anomalies, currentTime, onPointClick }) => {
-  // Obliczamy dynamiczne maksimum dla osi Y, aby alarm był zawsze widoczny
-  const maxScore = Math.max(...data.map(d => d.anomalyLevel), threshold);
-  const yDomain = [0, maxScore * 1.2];
+  const maxScore = Math.max(...data.map(d => d.anomalyLevel), threshold, 5);
+  const yDomain = [0, maxScore * 1.1];
 
   return (
     <div className="w-full h-full min-h-[400px] flex flex-col">
@@ -71,41 +72,49 @@ const AnomalyChart: React.FC<Props> = ({ data, threshold, anomalies, currentTime
             
             <XAxis 
               dataKey="time" 
-              hide={data.length > 100} 
+              hide={data.length > 80} 
               stroke="#475569"
-              fontSize={10}
+              fontSize={9}
+              tick={{fill: '#475569'}}
             />
             
-            <YAxis 
-              yAxisId="left"
-              domain={[0, 20000]}
-              hide
-            />
-
+            <YAxis yAxisId="left" hide />
             <YAxis 
               yAxisId="right"
               orientation="right"
               domain={yDomain}
               stroke="#ef4444"
-              fontSize={10}
+              fontSize={9}
+              tick={{fill: '#ef4444'}}
               tickFormatter={(v) => v.toFixed(1)}
             />
             
-            {/* Added threshold prop here so it's passed to the custom tooltip component */}
             <Tooltip content={<CustomTooltip threshold={threshold} />} />
             
+            {/* Rysowanie segmentów anomalii jako obszarów referencyjnych */}
             {anomalies.map((anom) => {
-              const startIdx = data.findIndex(d => Math.abs((d.second || 0) - (anom.offsetSeconds || 0)) < 0.1);
-              const endIdx = data.findIndex(d => Math.abs((d.second || 0) - ((anom.offsetSeconds || 0) + anom.durationSeconds)) < 0.1);
-              if (startIdx !== -1 && endIdx !== -1) {
+              // Szukamy najbliższych etykiet czasu na osi X dla segmentu
+              const startLabel = data.reduce((prev, curr) => 
+                Math.abs((curr.second || 0) - (anom.offsetSeconds || 0)) < Math.abs((prev.second || 0) - (anom.offsetSeconds || 0)) ? curr : prev
+              , data[0])?.time;
+
+              const endTime = (anom.offsetSeconds || 0) + anom.durationSeconds;
+              const endLabel = data.reduce((prev, curr) => 
+                Math.abs((curr.second || 0) - endTime) < Math.abs((prev.second || 0) - endTime) ? curr : prev
+              , data[0])?.time;
+
+              if (startLabel && endLabel) {
                 return (
                   <ReferenceArea 
                     key={anom.id}
-                    x1={data[startIdx].time}
-                    x2={data[endIdx].time}
+                    x1={startLabel}
+                    x2={endLabel}
                     fill="#ef4444"
-                    fillOpacity={0.15}
-                    stroke="none"
+                    fillOpacity={0.2}
+                    stroke="#ef4444"
+                    strokeOpacity={0.4}
+                    strokeDasharray="3 3"
+                    className="cursor-pointer"
                   />
                 );
               }
@@ -131,7 +140,7 @@ const AnomalyChart: React.FC<Props> = ({ data, threshold, anomalies, currentTime
               stroke="#ef4444" 
               fillOpacity={1} 
               fill="url(#colorAnom)" 
-              strokeWidth={3}
+              strokeWidth={2}
               isAnimationActive={false}
               name="Anomalia"
             />
@@ -140,26 +149,27 @@ const AnomalyChart: React.FC<Props> = ({ data, threshold, anomalies, currentTime
               yAxisId="right"
               y={threshold} 
               stroke="#ef4444" 
-              strokeWidth={2}
-              strokeDasharray="5 5" 
-              label={{ value: 'ALARM', position: 'insideRight', fill: '#ef4444', fontSize: 10, fontWeight: 'black', offset: 10 }} 
+              strokeWidth={1.5}
+              strokeDasharray="10 5" 
+              label={{ value: 'PRÓG NIEREGULARNOŚCI', position: 'insideRight', fill: '#ef4444', fontSize: 9, fontWeight: 'black', offset: 10 }} 
             />
             
             {currentTime !== undefined && (
               <ReferenceLine 
-                x={data.find(d => Math.abs((d.second || 0) - currentTime) < 0.05)?.time} 
+                x={data.reduce((prev, curr) => Math.abs((curr.second || 0) - currentTime) < Math.abs((prev.second || 0) - currentTime) ? curr : prev, data[0])?.time} 
                 stroke="#6366f1" 
                 strokeWidth={2}
+                isAnimationActive={false}
               />
             )}
 
             <Brush 
               dataKey="time" 
-              height={40} 
+              height={30} 
               stroke="#4f46e5" 
               fill="#0f172a" 
               gap={1}
-              travellerWidth={20}
+              travellerWidth={15}
             />
           </AreaChart>
         </ResponsiveContainer>
@@ -168,16 +178,19 @@ const AnomalyChart: React.FC<Props> = ({ data, threshold, anomalies, currentTime
         <div className="flex gap-4">
            <div className="flex items-center gap-2">
              <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
-             <span className="text-[9px] font-black uppercase text-slate-400">Dźwięk (Hz)</span>
+             <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider">Charakterystyka</span>
            </div>
            <div className="flex items-center gap-2">
              <div className="w-2 h-2 bg-red-500 rounded-full shadow-[0_0_8px_rgba(239,68,68,0.5)]"></div>
-             <span className="text-[9px] font-black uppercase text-slate-400">Anomalia</span>
+             <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider">Anomalia (Segment)</span>
            </div>
         </div>
-        <p className="text-[8px] font-black uppercase text-slate-500 tracking-[0.2em] animate-pulse">
-          Przesuń niebieski suwak, aby przybliżyć (ZOOM)
-        </p>
+        <div className="flex items-center gap-2 bg-slate-950/50 px-3 py-1 rounded-full border border-slate-800">
+           <Zap className="w-3 h-3 text-indigo-400" />
+           <p className="text-[8px] font-black uppercase text-slate-500 tracking-[0.15em]">
+              Interaktywny Segment: Kliknij czerwone pole, aby przejść do zdarzenia
+           </p>
+        </div>
       </div>
     </div>
   );
