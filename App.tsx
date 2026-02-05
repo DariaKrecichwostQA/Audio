@@ -96,6 +96,11 @@ const App: React.FC = () => {
       const mean = square.mean();
       const rms = tf.sqrt(mean);
       const rmsVal = rms.dataSync()[0];
+      
+      if (rmsVal < 0.0001) {
+        return { normalized: tf.zerosLike(tensor), gainDb: 0 };
+      }
+
       const targetRms = 0.063;
       const gain = targetRms / (rmsVal + 1e-8);
       const gainDb = 20 * Math.log10(gain);
@@ -126,7 +131,7 @@ const App: React.FC = () => {
     if (trainingQueue.length === 0) return;
     setMode('TRAINING');
     setStatus('Trenowanie...');
-    const audioCtx = new AudioContext();
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     try {
       for (let i = 0; i < trainingQueue.length; i++) {
         const item = trainingQueue[i];
@@ -134,20 +139,29 @@ const App: React.FC = () => {
         try {
           const arrayBuffer = await item.file.arrayBuffer();
           const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          
+          if (audioBuffer.length < 256) {
+             addLog(`Pominięto ${item.file.name}: plik za krótki`, 'warning');
+             continue;
+          }
+
           const rawChannelData = audioBuffer.getChannelData(0);
           const rawTensor = tf.tensor1d(rawChannelData);
           const { normalized: audioTensor } = normalizeTensor(rawTensor);
           rawTensor.dispose();
-          const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
+
+          const frameStep = Math.max(1, Math.floor(audioBuffer.sampleRate * 0.015));
           const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
           const magnitudes = tf.abs(spectrogram);
           const spectrogramData = await magnitudes.array() as number[][];
+          
           const frames = spectrogramData.map(row => detector.scaleFrame(row.slice(0, 128)));
           await detector.trainOnFile(frames, item.label);
+          
           audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
           addLog(`Nauczono: ${item.file.name}`, 'success');
         } catch (err) {
-          addLog(`Błąd: ${item.file.name}`, 'error');
+          addLog(`Błąd ${item.file.name}: format nieobsługiwany`, 'error');
         }
         await tf.nextFrame();
       }
@@ -169,15 +183,30 @@ const App: React.FC = () => {
       setAnomalies([]);
       const fileUrl = URL.createObjectURL(file);
       setAnalyzedFileUrl(fileUrl);
-      const audioCtx = new AudioContext();
+      
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const arrayBuffer = await file.arrayBuffer();
-      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      let audioBuffer;
+      try {
+        audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      } catch (e) {
+        addLog(`Błąd: Nie udało się odkodować pliku ${file.name}`, 'error');
+        setMode('IDLE');
+        return;
+      }
+
+      if (audioBuffer.length < 512) {
+        addLog("Błąd: Plik audio jest zbyt krótki do analizy", "error");
+        setMode('IDLE');
+        return;
+      }
+
       const rawChannelData = audioBuffer.getChannelData(0);
       const rawTensor = tf.tensor1d(rawChannelData);
-      const { normalized: audioTensor, gainDb } = normalizeTensor(rawTensor);
+      const { normalized: audioTensor } = normalizeTensor(rawTensor);
       rawTensor.dispose();
 
-      const frameStep = Math.floor(audioBuffer.sampleRate * 0.015);
+      const frameStep = Math.max(1, Math.floor(audioBuffer.sampleRate * 0.015));
       const frameDurationSec = frameStep / audioBuffer.sampleRate;
       const windowSize = detector.getWindowSize();
       const spectrogram = tf.signal.stft(audioTensor, 256, frameStep);
@@ -185,18 +214,30 @@ const App: React.FC = () => {
       const spectrogramData = await magnitudes.array() as number[][];
       const numFrames = spectrogramData.length;
       
+      audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
+
+      if (numFrames < windowSize) {
+        addLog("Błąd: Za mało ramek audio dla okna analizy", "error");
+        setMode('IDLE');
+        return;
+      }
+
       const allScores: number[] = [];
       const preliminaryPoints: {timestamp: number, hz: number, score: number}[] = [];
 
       for (let i = 0; i <= numFrames - windowSize; i++) {
+        // Fix: Removed invalid tf.tidy wrap around async operations. 
+        // detector.predict already handles internal tensor cleanup via its own tf.tidy.
         const rawSequence = spectrogramData.slice(i, i + windowSize);
         const sequence = rawSequence.map(frame => detector.scaleFrame(frame.slice(0, 128)));
         const { score } = await detector.predict(sequence);
-        const hz = calculateCentroid(rawSequence[windowSize-1].slice(0, 128), audioBuffer.sampleRate);
+        const hz = calculateCentroid(rawSequence[windowSize - 1].slice(0, 128), audioBuffer.sampleRate);
+
         allScores.push(score);
         preliminaryPoints.push({ timestamp: (i + windowSize) * frameDurationSec, hz, score });
-        if (i % 800 === 0) {
-          setBatchProgress(Math.round((i / numFrames) * 50));
+        
+        if (i % 250 === 0) {
+          setBatchProgress(Math.round((i / (numFrames - windowSize)) * 50));
           await tf.nextFrame();
         }
       }
@@ -260,11 +301,10 @@ const App: React.FC = () => {
       setChartData(finalChartData);
       setAnomalies(finalAnomalies);
       setMode('IDLE'); setStatus('Gotowy');
-      audioTensor.dispose(); spectrogram.dispose(); magnitudes.dispose();
       addLog(`Analiza zakończona. Wykryto ${finalAnomalies.length} anomalii.`, finalAnomalies.length > 0 ? 'warning' : 'success');
       audioCtx.close();
-    } catch (err) {
-      addLog("Błąd analizy pliku", "error");
+    } catch (err: any) {
+      addLog(`Błąd krytyczny analizy: ${err?.message || 'Nieznany'}`, "error");
       setMode('IDLE');
     }
   };
@@ -275,7 +315,7 @@ const App: React.FC = () => {
       setStatus('LIVE');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
-      const audioCtx = new AudioContext();
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioContextRef.current = audioCtx;
       const analyzer = audioCtx.createAnalyser();
       analyzer.fftSize = 256;
@@ -325,7 +365,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 p-2 sm:p-4 lg:p-6 font-sans overflow-x-hidden print:bg-white print:p-0">
-      {/* Elementy ukryte podczas drukowania */}
       <div className="print:hidden">
         <header className="flex flex-col xl:flex-row items-center justify-between gap-6 mb-8 w-full">
           <div className="flex items-center gap-4 w-full xl:w-auto">
@@ -441,7 +480,7 @@ const App: React.FC = () => {
           <div className="lg:col-span-6 flex flex-col gap-6">
              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Live Score</p>
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Status Operacji</p>
                   <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
                      {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
                   </span>
@@ -513,7 +552,6 @@ const App: React.FC = () => {
         {anomalies.length > 0 && mode === 'IDLE' && <section className="mt-8 pb-10"><ReportTable anomalies={anomalies} /></section>}
       </div>
 
-      {/* Widok raportu technicznego (ukryty domyślnie, widoczny tylko w modalu lub podczas drukowania) */}
       {showReportModal && (
         <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-[1000] flex flex-col p-4 sm:p-8 print:relative print:p-0 print:bg-white overflow-y-auto">
           <div className="max-w-[210mm] mx-auto w-full flex flex-col gap-6">
