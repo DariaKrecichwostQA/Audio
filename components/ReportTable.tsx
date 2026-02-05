@@ -1,24 +1,13 @@
 
-import React, { useState } from 'react';
+import React from 'react';
 import { Anomaly } from '../types';
-import { FileText, Download, ShieldAlert, Zap, Clock, Activity, MessageSquare } from 'lucide-react';
-import { geminiService } from '../services/geminiService';
+import { ShieldAlert, Zap, Clock, Activity } from 'lucide-react';
 
 interface Props {
   anomalies: Anomaly[];
 }
 
 const ReportTable: React.FC<Props> = ({ anomalies }) => {
-  const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
-  const [loadingAi, setLoadingAi] = useState(false);
-
-  const getAiInsights = async () => {
-    setLoadingAi(true);
-    const analysis = await geminiService.analyzeAnomalies(anomalies);
-    setAiAnalysis(analysis);
-    setLoadingAi(false);
-  };
-
   return (
     <div className="space-y-8">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -74,34 +63,17 @@ const ReportTable: React.FC<Props> = ({ anomalies }) => {
         </table>
       </div>
 
-      <div className="bg-indigo-600/10 border border-indigo-500/20 p-8 rounded-[2.5rem] relative overflow-hidden">
-        <div className="absolute top-0 right-0 p-10 opacity-5 pointer-events-none">
-          <MessageSquare size={120} />
+      <div className="bg-slate-900/40 border border-slate-800 p-8 rounded-[2.5rem] flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-black uppercase text-slate-200 flex items-center gap-2">
+            <ShieldAlert className="text-indigo-500 w-5 h-5" /> Raport Techniczny
+          </h3>
+          <p className="text-xs text-slate-500 mt-1 uppercase font-bold tracking-wider">Wszystkie dane przetwarzane są lokalnie przez silnik TensorFlow.js</p>
         </div>
-        <h3 className="text-xl font-black uppercase tracking-tight text-white flex items-center gap-3 mb-6">
-          <ShieldAlert className="text-indigo-500" /> Analiza Diagnostyczna Gemini AI
-        </h3>
-        
-        {aiAnalysis ? (
-          <div className="prose prose-invert max-w-none">
-            <div className="text-sm text-indigo-200 leading-relaxed whitespace-pre-wrap bg-slate-900/50 p-6 rounded-2xl border border-indigo-500/30">
-              {aiAnalysis}
-            </div>
-            <button onClick={() => setAiAnalysis(null)} className="mt-4 text-[10px] font-black uppercase text-slate-500 hover:text-white">Wyczyść analizę</button>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-indigo-500/20 rounded-3xl">
-             <p className="text-slate-400 text-sm mb-6 font-medium">Użyj sztucznej inteligencji, aby zinterpretować wzorce dźwiękowe.</p>
-             <button 
-                onClick={getAiInsights}
-                disabled={loadingAi || anomalies.length === 0}
-                className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-8 py-3 rounded-2xl text-[11px] font-black uppercase shadow-xl shadow-indigo-600/20 flex items-center gap-2 transition-all"
-             >
-                {loadingAi ? <Activity className="animate-spin w-4 h-4" /> : <Zap className="w-4 h-4 fill-current" />}
-                Generuj Diagnozę AI
-             </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2 bg-indigo-500/10 px-4 py-2 rounded-2xl border border-indigo-500/20">
+          <Zap className="w-4 h-4 text-indigo-400 fill-current" />
+          <span className="text-[10px] font-black text-indigo-400 uppercase tracking-tighter">Analiza Lokalna Aktywna</span>
+        </div>
       </div>
     </div>
   );

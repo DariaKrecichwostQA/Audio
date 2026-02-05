@@ -76,10 +76,25 @@ class AnomalyDetector {
   public getBackendName() { return tf.getBackend().toUpperCase(); }
   public getIsLoadedFromStorage() { return this.isModelLoaded; }
 
+  /**
+   * PRZETWARZANIE WIDMA Z PODBICIEM WYSOKICH TONÓW
+   */
   public scaleFrame(frame: number[]) {
-    return frame.map(v => {
-      const val = Math.max(0, v - 0.10); // Lżejsza redukcja szumu tła
-      const compressed = Math.log10(1 + val * 5) / Math.log10(50); 
+    const len = frame.length;
+    return frame.map((v, i) => {
+      // 1. FILTR PRE-EMFAZY: Progresywne wzmocnienie wysokich częstotliwości
+      // Niskie biny zostają bez zmian, najwyższe są podbite 2.5-krotnie.
+      // To pozwala modelowi "zauważyć" subtelne piski łożysk.
+      const boost = 1.0 + (i / len) * 1.5;
+      const boostedVal = v * boost;
+
+      // 2. Redukcja statycznego szumu tła (noise floor)
+      const cleaned = Math.max(0, boostedVal - 0.08);
+
+      // 3. Logarytmiczna kompresja dynamiki (Mel-like behavior)
+      // Skupiamy się na zmianach energii, a nie tylko na głośności bezwzględnej.
+      const compressed = Math.log10(1 + cleaned * 10) / Math.log10(101);
+      
       return Math.min(255, Math.max(0, compressed * 255));
     });
   }
@@ -88,8 +103,6 @@ class AnomalyDetector {
     if (scores.length < 10) return 3.5;
     
     const sorted = [...scores].sort((a, b) => a - b);
-    
-    // ZMIANA: Przesunięcie na 65. percentyl (bliżej sygnału niż Q3)
     const baselineIndex = Math.floor(sorted.length * 0.65);
     const baseline = sorted[baselineIndex];
     
@@ -97,11 +110,9 @@ class AnomalyDetector {
     const sortedDeviations = [...absoluteDeviations].sort((a, b) => a - b);
     const mad = sortedDeviations[Math.floor(sortedDeviations.length / 2)];
     
-    // ZMIANA: Znacznie mniejszy mnożnik (wcześniej dochodził do 10-14, teraz max 6)
     const multiplier = 6.0 - (this.sensitivity * 0.4);
     const sigmaEst = mad * 1.4826;
     
-    // Safety floor obniżony na 0.5
     return Math.max(0.5, baseline + (multiplier * sigmaEst));
   }
 

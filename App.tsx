@@ -6,12 +6,13 @@ import {
   Zap, Volume2, FileSearch, Mic, Trash2, 
   ChevronDown, ChevronRight, Terminal, Database,
   SlidersHorizontal, Save, RefreshCw, BarChart3, Cpu, AlertTriangle,
-  HardDrive, FolderOpen, Sliders
+  HardDrive, FolderOpen, Sliders, FileText, Printer, X
 } from 'lucide-react';
 import * as tf from '@tensorflow/tfjs';
 import { Anomaly, AudioChartData, ModelConfig } from './types';
 import AnomalyChart from './components/AnomalyChart';
 import ReportTable from './components/ReportTable';
+import TechnicalReportView from './components/TechnicalReportView';
 import { detector } from './services/anomalyModel';
 
 interface FileQueueItem {
@@ -33,6 +34,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState('Inicjalizacja...');
   const [tfBackend, setTfBackend] = useState('...');
   const [showSettings, setShowSettings] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
   const [trainingQueue, setTrainingQueue] = useState<FileQueueItem[]>([]);
   const [batchProgress, setBatchProgress] = useState(0);
   const [currentScore, setCurrentScore] = useState(0);
@@ -97,7 +99,7 @@ const App: React.FC = () => {
       const targetRms = 0.063;
       const gain = targetRms / (rmsVal + 1e-8);
       const gainDb = 20 * Math.log10(gain);
-      return { normalized: tensor.mul(gain).clipByValue(-0.95, 0.95), gainDb };
+      return { normalized: tensor.mul(gain).clipByValue(-0.95, 0.95) as tf.Tensor1D, gainDb };
     });
   };
 
@@ -199,7 +201,6 @@ const App: React.FC = () => {
         }
       }
 
-      // KOMPLEKSOWY PRÓG LOKALNY:
       const localAnalysisThreshold = detector.calculateRobustThreshold(allScores);
       const finalThresh = detector.getTotalFiles() > 0 
         ? (detector.getThreshold() * 0.6 + localAnalysisThreshold * 0.4) 
@@ -210,7 +211,6 @@ const App: React.FC = () => {
       const finalChartData: AudioChartData[] = [];
       const detectedSegments: Anomaly[] = [];
       
-      // SKRÓCONY BUFOR WYGŁADZANIA (12 próbek) dla lepszej czułości na piki
       let smoothScoreBuffer: number[] = [];
       let smoothHzBuffer: number[] = [];
 
@@ -232,10 +232,9 @@ const App: React.FC = () => {
           });
         }
 
-        // Segmentacja bez sztucznego marginesu (wcześniej było * 1.2)
         if (smoothedScore > finalThresh) {
           const lastSeg = detectedSegments[detectedSegments.length - 1];
-          const mergeThreshold = 0.5; // Łączenie segmentów blisko siebie
+          const mergeThreshold = 0.5;
 
           if (!lastSeg || (point.timestamp - (lastSeg.offsetSeconds! + lastSeg.durationSeconds)) > mergeThreshold) {
             detectedSegments.push({ 
@@ -258,7 +257,6 @@ const App: React.FC = () => {
       });
 
       const finalAnomalies = detectedSegments.filter(s => s.durationSeconds >= 0.25);
-
       setChartData(finalChartData);
       setAnomalies(finalAnomalies);
       setMode('IDLE'); setStatus('Gotowy');
@@ -321,187 +319,221 @@ const App: React.FC = () => {
     }
   };
 
+  const handlePrintReport = () => {
+    window.print();
+  };
+
   return (
-    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 p-2 sm:p-4 lg:p-6 font-sans overflow-x-hidden">
-      <header className="flex flex-col xl:flex-row items-center justify-between gap-6 mb-8 w-full">
-        <div className="flex items-center gap-4 w-full xl:w-auto">
-          <div className="bg-indigo-600 p-3 rounded-2xl shadow-xl animate-glow">
-            <BrainCircuit className="w-8 h-8" />
-          </div>
-          <div className="flex-1">
-            <h1 className="text-2xl sm:text-3xl font-black tracking-tighter italic uppercase leading-none">AUDIO<span className="text-indigo-400">SENTINEL</span></h1>
-            <div className="flex flex-wrap items-center gap-2 mt-2">
-                 <div className="flex items-center gap-1.5 bg-slate-900/80 px-2 py-1 rounded-lg border border-slate-800">
-                    <span className={`w-2 h-2 rounded-full ${mode !== 'IDLE' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-700'}`}></span>
-                    <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">{status}</span>
-                 </div>
-                 <div className="flex items-center gap-1.5 bg-indigo-500/10 px-2 py-1 rounded-lg border border-indigo-500/20">
-                    <Cpu className="w-3 h-3 text-indigo-400" />
-                    <span className="text-[10px] font-black uppercase text-indigo-400">{tfBackend}</span>
-                 </div>
+    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 p-2 sm:p-4 lg:p-6 font-sans overflow-x-hidden print:bg-white print:p-0">
+      {/* Elementy ukryte podczas drukowania */}
+      <div className="print:hidden">
+        <header className="flex flex-col xl:flex-row items-center justify-between gap-6 mb-8 w-full">
+          <div className="flex items-center gap-4 w-full xl:w-auto">
+            <div className="bg-indigo-600 p-3 rounded-2xl shadow-xl animate-glow">
+              <BrainCircuit className="w-8 h-8" />
+            </div>
+            <div className="flex-1">
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tighter italic uppercase leading-none">AUDIO<span className="text-indigo-400">SENTINEL</span></h1>
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                   <div className="flex items-center gap-1.5 bg-slate-900/80 px-2 py-1 rounded-lg border border-slate-800">
+                      <span className={`w-2 h-2 rounded-full ${mode !== 'IDLE' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-700'}`}></span>
+                      <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">{status}</span>
+                   </div>
+                   <div className="flex items-center gap-1.5 bg-indigo-500/10 px-2 py-1 rounded-lg border border-indigo-500/20">
+                      <Cpu className="w-3 h-3 text-indigo-400" />
+                      <span className="text-[10px] font-black uppercase text-indigo-400">{tfBackend}</span>
+                   </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="flex flex-wrap items-center justify-center gap-3 bg-slate-900/60 p-2 sm:p-3 rounded-2xl border border-slate-800 shadow-2xl backdrop-blur-xl w-full xl:w-auto">
-           <div className="flex items-center gap-2 bg-slate-800/50 p-2 rounded-2xl border border-slate-700/50">
-             <div className="flex flex-col gap-1">
-                <button className="relative bg-emerald-600/10 hover:bg-emerald-600 text-emerald-500 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all flex items-center gap-2 border border-emerald-500/30">
-                  <Database className="w-3.5 h-3.5" /> Normal
-                  <input type="file" multiple className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => addToQueue(e.target.files, 'Normal')} />
+          <div className="flex flex-wrap items-center justify-center gap-3 bg-slate-900/60 p-2 sm:p-3 rounded-2xl border border-slate-800 shadow-2xl backdrop-blur-xl w-full xl:w-auto">
+             <div className="flex items-center gap-2 bg-slate-800/50 p-2 rounded-2xl border border-slate-700/50">
+               <div className="flex flex-col gap-1">
+                  <button className="relative bg-emerald-600/10 hover:bg-emerald-600 text-emerald-500 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all flex items-center gap-2 border border-emerald-500/30">
+                    <Database className="w-3.5 h-3.5" /> Normal
+                    <input type="file" multiple className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => addToQueue(e.target.files, 'Normal')} />
+                  </button>
+                  <button className="relative bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all flex items-center gap-2 border border-red-500/30">
+                    <Database className="w-3.5 h-3.5" /> Anomalia
+                    <input type="file" multiple className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => addToQueue(e.target.files, 'Anomaly')} />
+                  </button>
+               </div>
+               <button 
+                  disabled={mode !== 'IDLE' || trainingQueue.length === 0} 
+                  onClick={runIncrementalTraining} 
+                  className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-4 py-3 rounded-xl transition-all shadow-lg flex flex-col items-center justify-center gap-1 min-w-[100px]"
+               >
+                  {mode === 'TRAINING' ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+                  <span className="text-[9px] font-black uppercase">Trenuj</span>
+               </button>
+             </div>
+
+             <div className="flex items-center gap-2 sm:gap-3">
+                <button disabled={mode !== 'IDLE'} className="relative bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-indigo-400 px-4 py-3 rounded-xl text-[10px] font-black uppercase border border-slate-700 flex items-center gap-2">
+                  <FileAudio className="w-4 h-4" /> Skanuj Audio
+                  <input type="file" accept="audio/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => e.target.files?.[0] && analyzeSingleFile(e.target.files[0])} />
                 </button>
-                <button className="relative bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all flex items-center gap-2 border border-red-500/30">
-                  <Database className="w-3.5 h-3.5" /> Anomalia
-                  <input type="file" multiple className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => addToQueue(e.target.files, 'Anomaly')} />
+                {mode !== 'MONITORING' ? (
+                  <button disabled={mode !== 'IDLE'} onClick={startLive} className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-500/20 flex items-center gap-2"><Mic className="w-4 h-4" /> Live</button>
+                ) : (
+                  <button onClick={() => { monitoringRef.current = false; setMode('IDLE'); }} className="bg-red-600 hover:bg-red-500 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase flex items-center gap-2"><Square className="w-4 h-4" /> Stop</button>
+                )}
+             </div>
+
+             <div className="flex items-center gap-2">
+                <button onClick={() => setShowReportModal(true)} className="p-3 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white rounded-xl transition-all border border-indigo-500/30">
+                  <FileText className="w-5 h-5" />
+                </button>
+                <button onClick={() => setShowSettings(true)} className="p-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl transition-all border border-slate-700">
+                  <Settings className="w-5 h-5" />
                 </button>
              </div>
-             <button 
-                disabled={mode !== 'IDLE' || trainingQueue.length === 0} 
-                onClick={runIncrementalTraining} 
-                className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-4 py-3 rounded-xl transition-all shadow-lg flex flex-col items-center justify-center gap-1 min-w-[100px]"
-             >
-                {mode === 'TRAINING' ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
-                <span className="text-[9px] font-black uppercase">Trenuj</span>
-             </button>
-           </div>
+          </div>
+        </header>
 
-           <div className="flex items-center gap-2 sm:gap-3">
-              <button disabled={mode !== 'IDLE'} className="relative bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-indigo-400 px-4 py-3 rounded-xl text-[10px] font-black uppercase border border-slate-700 flex items-center gap-2">
-                <FileAudio className="w-4 h-4" /> Skanuj Audio
-                <input type="file" accept="audio/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => e.target.files?.[0] && analyzeSingleFile(e.target.files[0])} />
-              </button>
-              {mode !== 'MONITORING' ? (
-                <button disabled={mode !== 'IDLE'} onClick={startLive} className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-emerald-500/20 flex items-center gap-2"><Mic className="w-4 h-4" /> Live</button>
-              ) : (
-                <button onClick={() => { monitoringRef.current = false; setMode('IDLE'); }} className="bg-red-600 hover:bg-red-500 text-white px-4 py-3 rounded-xl text-[10px] font-black uppercase flex items-center gap-2"><Square className="w-4 h-4" /> Stop</button>
-              )}
-           </div>
-
-           <button onClick={() => setShowSettings(true)} className="p-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-xl transition-all border border-slate-700">
-             <Settings className="w-5 h-5" />
-           </button>
-        </div>
-      </header>
-
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-20">
-        <div className="lg:col-span-3 space-y-6">
-           <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
-              <h2 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mb-4"><BarChart3 className="w-4 h-4" /> Diagnostyka</h2>
-              <div className="grid grid-cols-2 gap-4">
-                 <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[8px] font-black text-slate-500 uppercase">Nauczone</p>
-                    <p className="text-lg font-black text-white">{totalTrained}</p>
-                 </div>
-                 <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[8px] font-black text-slate-500 uppercase">Próg Detekcji</p>
-                    <p className="text-lg font-black text-emerald-400">{dynamicThreshold.toFixed(2)}</p>
-                 </div>
-              </div>
-              <div className="mt-6 pt-6 border-t border-slate-800">
-                 <div className="flex items-center justify-between mb-2">
-                    <p className="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5"><Sliders className="w-3.5 h-3.5" /> Czułość</p>
-                    <span className="text-[10px] font-mono text-indigo-400 font-black">{sensitivity}</span>
-                 </div>
-                 <input 
-                    type="range" min="1" max="10" step="0.5" 
-                    value={sensitivity} 
-                    onChange={(e) => {
-                       const val = parseFloat(e.target.value);
-                       setSensitivity(val);
-                       detector.setSensitivity(val);
-                       setDynamicThreshold(detector.getThreshold());
-                    }}
-                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
-                 />
-              </div>
-           </div>
-           
-           <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[300px] flex flex-col">
-              <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-4"><Upload className="w-4 h-4 text-indigo-500" /> Kolejka ({trainingQueue.length})</h2>
-              <div className="flex-1 overflow-y-auto space-y-1 pr-1 scrollbar-thin">
-                {trainingQueue.map((item, idx) => (
-                  <div key={idx} className="bg-slate-950/30 border border-slate-800/50 p-2 rounded-lg flex items-center justify-between">
-                    <p className="text-[9px] font-medium truncate text-slate-400 uppercase">{item.file.name}</p>
-                    <button onClick={() => setTrainingQueue(q => q.filter((_, i) => i !== idx))} className="text-red-500"><Trash2 className="w-3 h-3" /></button>
-                  </div>
-                ))}
-              </div>
-           </div>
-        </div>
-
-        <div className="lg:col-span-6 flex flex-col gap-6">
-           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Live Score</p>
-                <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
-                   {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
-                </span>
-              </div>
-              <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Częstotliwość</p>
-                <p className="text-xl font-black text-white">{chartData.length > 0 ? chartData[chartData.length-1].amplitude.toFixed(0) : '0'} Hz</p>
-              </div>
-              <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Anomalie</p>
-                <p className="text-xl font-black text-white">{anomalies.length}</p>
-              </div>
-              <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-                <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Baza AI</p>
-                <p className={`text-xl font-black ${isPersistent ? 'text-emerald-400' : 'text-slate-500'}`}>{isPersistent ? 'OK' : 'BRAK'}</p>
-              </div>
-           </div>
-
-           <div className="flex-1 bg-slate-900/40 border border-slate-800/50 rounded-[3rem] p-4 sm:p-8 flex flex-col shadow-2xl backdrop-blur-sm min-h-[450px]">
-             {analyzedFileUrl && (
-                <div className="mb-6 bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center gap-4">
-                   <Volume2 className="text-indigo-400 w-5 h-5" />
-                   <audio ref={mainAudioRef} src={analyzedFileUrl} controls onTimeUpdate={() => setCurrentTime(mainAudioRef.current?.currentTime || 0)} className="flex-1 h-8" />
+        <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 pb-20">
+          <div className="lg:col-span-3 space-y-6">
+             <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
+                <h2 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2 mb-4"><BarChart3 className="w-4 h-4" /> Diagnostyka</h2>
+                <div className="grid grid-cols-2 gap-4">
+                   <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[8px] font-black text-slate-500 uppercase">Nauczone</p>
+                      <p className="text-lg font-black text-white">{totalTrained}</p>
+                   </div>
+                   <div className="bg-slate-950/40 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[8px] font-black text-slate-500 uppercase">Próg Detekcji</p>
+                      <p className="text-lg font-black text-emerald-400">{dynamicThreshold.toFixed(2)}</p>
+                   </div>
                 </div>
-             )}
-             <div className="flex-1">
-                <AnomalyChart 
-                  data={chartData} 
-                  threshold={dynamicThreshold} 
-                  anomalies={anomalies} 
-                  currentTime={currentTime} 
-                  onPointClick={(p) => p.second !== undefined && seekTo(p.second)} 
-                />
+                <div className="mt-6 pt-6 border-t border-slate-800">
+                   <div className="flex items-center justify-between mb-2">
+                      <p className="text-[9px] font-black text-slate-400 uppercase flex items-center gap-1.5"><Sliders className="w-3.5 h-3.5" /> Czułość</p>
+                      <span className="text-[10px] font-mono text-indigo-400 font-black">{sensitivity}</span>
+                   </div>
+                   <input 
+                      type="range" min="1" max="10" step="0.5" 
+                      value={sensitivity} 
+                      onChange={(e) => {
+                         const val = parseFloat(e.target.value);
+                         setSensitivity(val);
+                         detector.setSensitivity(val);
+                         setDynamicThreshold(detector.getThreshold());
+                      }}
+                      className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
+                   />
+                </div>
              </div>
-           </div>
-        </div>
-
-        <div className="lg:col-span-3 flex flex-col gap-6">
-           <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[450px] flex flex-col shadow-xl">
-              <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Wykryte Zdarzenia</h2>
-              <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin">
-                {anomalies.map((a) => (
-                  <div key={a.id} className="p-3 rounded-2xl border border-slate-800 bg-slate-950/60 hover:border-indigo-500/60 cursor-pointer" onClick={() => seekTo(a.offsetSeconds || 0)}>
-                    <div className="flex justify-between items-center mb-1">
-                        <span className={`text-[8px] font-black uppercase px-1 rounded text-white ${a.severity === 'High' ? 'bg-red-500' : 'bg-amber-500'}`}>{a.severity}</span>
-                        <span className="text-[10px] font-mono text-slate-500">{a.offsetSeconds?.toFixed(2)}s</span>
+             
+             <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[300px] flex flex-col">
+                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-4"><Upload className="w-4 h-4 text-indigo-500" /> Kolejka ({trainingQueue.length})</h2>
+                <div className="flex-1 overflow-y-auto space-y-1 pr-1 scrollbar-thin">
+                  {trainingQueue.map((item, idx) => (
+                    <div key={idx} className="bg-slate-950/30 border border-slate-800/50 p-2 rounded-lg flex items-center justify-between">
+                      <p className="text-[9px] font-medium truncate text-slate-400 uppercase">{item.file.name}</p>
+                      <button onClick={() => setTrainingQueue(q => q.filter((_, i) => i !== idx))} className="text-red-500"><Trash2 className="w-3 h-3" /></button>
                     </div>
-                    <p className="text-[10px] text-slate-400 font-bold">Nieregularność: x{(a.intensity).toFixed(1)}</p>
-                    <p className="text-[9px] text-indigo-400/80 mt-1 uppercase font-black italic">Trwanie: {a.durationSeconds.toFixed(2)}s</p>
-                  </div>
-                ))}
-              </div>
-           </div>
-
-           <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-4 flex flex-col">
-              <button onClick={() => setShowConsole(!showConsole)} className="flex items-center justify-between w-full text-[10px] font-black uppercase text-slate-500">
-                <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Logi Systemowe</div>
-                {showConsole ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-              </button>
-              {showConsole && (
-                <div className="mt-3 h-32 bg-black/60 rounded-xl p-3 font-mono text-[9px] overflow-y-auto scrollbar-thin">
-                  {logs.map((log, i) => <div key={i} className={`text-[10px] mb-1 ${log.type === 'warning' ? 'text-amber-400' : log.type === 'error' ? 'text-red-400' : 'text-indigo-300'}`}>[{log.time}] {log.message}</div>)}
+                  ))}
                 </div>
-              )}
-           </div>
-        </div>
-      </main>
+             </div>
+          </div>
 
-      {anomalies.length > 0 && mode === 'IDLE' && <section className="mt-8 pb-10"><ReportTable anomalies={anomalies} /></section>}
+          <div className="lg:col-span-6 flex flex-col gap-6">
+             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Live Score</p>
+                  <span className={`text-xl font-mono font-black ${currentScore > dynamicThreshold ? 'text-red-500 animate-pulse' : 'text-indigo-400'}`}>
+                     {mode === 'FILE_ANALYSIS' || mode === 'TRAINING' ? `${batchProgress}%` : currentScore.toFixed(2)}
+                  </span>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Częstotliwość</p>
+                  <p className="text-xl font-black text-white">{chartData.length > 0 ? chartData[chartData.length-1].amplitude.toFixed(0) : '0'} Hz</p>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Anomalie</p>
+                  <p className="text-xl font-black text-white">{anomalies.length}</p>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
+                  <p className="text-slate-500 text-[9px] uppercase font-black mb-1">Baza AI</p>
+                  <p className={`text-xl font-black ${isPersistent ? 'text-emerald-400' : 'text-slate-500'}`}>{isPersistent ? 'OK' : 'BRAK'}</p>
+                </div>
+             </div>
+
+             <div className="flex-1 bg-slate-900/40 border border-slate-800/50 rounded-[3rem] p-4 sm:p-8 flex flex-col shadow-2xl backdrop-blur-sm min-h-[450px]">
+               {analyzedFileUrl && (
+                  <div className="mb-6 bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center gap-4">
+                     <Volume2 className="text-indigo-400 w-5 h-5" />
+                     <audio ref={mainAudioRef} src={analyzedFileUrl} controls onTimeUpdate={() => setCurrentTime(mainAudioRef.current?.currentTime || 0)} className="flex-1 h-8" />
+                  </div>
+               )}
+               <div className="flex-1">
+                  <AnomalyChart 
+                    data={chartData} 
+                    threshold={dynamicThreshold} 
+                    anomalies={anomalies} 
+                    currentTime={currentTime} 
+                    onPointClick={(p) => p.second !== undefined && seekTo(p.second)} 
+                  />
+               </div>
+             </div>
+          </div>
+
+          <div className="lg:col-span-3 flex flex-col gap-6">
+             <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-6 h-[450px] flex flex-col shadow-xl">
+                <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-6"><History className="w-4 h-4 text-indigo-500" /> Wykryte Zdarzenia</h2>
+                <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin">
+                  {anomalies.map((a) => (
+                    <div key={a.id} className="p-3 rounded-2xl border border-slate-800 bg-slate-950/60 hover:border-indigo-500/60 cursor-pointer" onClick={() => seekTo(a.offsetSeconds || 0)}>
+                      <div className="flex justify-between items-center mb-1">
+                          <span className={`text-[8px] font-black uppercase px-1 rounded text-white ${a.severity === 'High' ? 'bg-red-500' : 'bg-amber-500'}`}>{a.severity}</span>
+                          <span className="text-[10px] font-mono text-slate-500">{a.offsetSeconds?.toFixed(2)}s</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 font-bold">Nieregularność: x{(a.intensity).toFixed(1)}</p>
+                      <p className="text-[9px] text-indigo-400/80 mt-1 uppercase font-black italic">Trwanie: {a.durationSeconds.toFixed(2)}s</p>
+                    </div>
+                  ))}
+                </div>
+             </div>
+
+             <div className="bg-slate-900/40 border border-slate-800/50 rounded-3xl p-4 flex flex-col">
+                <button onClick={() => setShowConsole(!showConsole)} className="flex items-center justify-between w-full text-[10px] font-black uppercase text-slate-500">
+                  <div className="flex items-center gap-2"><Terminal className="w-3.5 h-3.5" /> Logi Systemowe</div>
+                  {showConsole ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                </button>
+                {showConsole && (
+                  <div className="mt-3 h-32 bg-black/60 rounded-xl p-3 font-mono text-[9px] overflow-y-auto scrollbar-thin">
+                    {logs.map((log, i) => <div key={i} className={`text-[10px] mb-1 ${log.type === 'warning' ? 'text-amber-400' : log.type === 'error' ? 'text-red-400' : 'text-indigo-300'}`}>[{log.time}] {log.message}</div>)}
+                  </div>
+                )}
+             </div>
+          </div>
+        </main>
+
+        {anomalies.length > 0 && mode === 'IDLE' && <section className="mt-8 pb-10"><ReportTable anomalies={anomalies} /></section>}
+      </div>
+
+      {/* Widok raportu technicznego (ukryty domyślnie, widoczny tylko w modalu lub podczas drukowania) */}
+      {showReportModal && (
+        <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-[1000] flex flex-col p-4 sm:p-8 print:relative print:p-0 print:bg-white overflow-y-auto">
+          <div className="max-w-[210mm] mx-auto w-full flex flex-col gap-6">
+            <div className="flex justify-between items-center print:hidden">
+              <button onClick={() => setShowReportModal(false)} className="flex items-center gap-2 text-slate-400 hover:text-white transition-all uppercase text-[10px] font-black">
+                <X className="w-5 h-5" /> Zamknij Podgląd
+              </button>
+              <button onClick={handlePrintReport} className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl flex items-center gap-2 uppercase text-xs font-black shadow-xl">
+                <Printer className="w-5 h-5" /> Drukuj do PDF
+              </button>
+            </div>
+            <TechnicalReportView 
+              anomalies={anomalies} 
+              totalTrained={totalTrained} 
+              sensitivity={sensitivity} 
+              threshold={dynamicThreshold} 
+            />
+          </div>
+        </div>
+      )}
 
       {showSettings && (
         <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[500] flex items-center justify-center p-4">
