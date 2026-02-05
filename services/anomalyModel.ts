@@ -12,7 +12,7 @@ class AnomalyDetector {
     batchSize: 32,
     latentDim: 24
   };
-  private threshold: number = 5.0; // Wyższy próg startowy
+  private threshold: number = 3.5; 
   private sensitivity: number = 5.0; 
   private windowSize: number = 12;
   private errorStats: number[] = [];
@@ -42,7 +42,7 @@ class AnomalyDetector {
         const parsed = JSON.parse(savedStats);
         this.errorStats = parsed.errorStats || [];
         this.totalProcessedFiles = parsed.totalProcessedFiles || 0;
-        this.threshold = parsed.threshold || 5.0;
+        this.threshold = parsed.threshold || 3.5;
         this.sensitivity = parsed.sensitivity || 5.0;
       }
     } catch (e) {
@@ -78,34 +78,31 @@ class AnomalyDetector {
 
   public scaleFrame(frame: number[]) {
     return frame.map(v => {
-      // Filtracja odszumiająca - ignorujemy najcichsze 15% sygnału
-      const val = Math.max(0, v - 0.15); 
-      const compressed = Math.log10(1 + val * 4) / Math.log10(40); 
+      const val = Math.max(0, v - 0.10); // Lżejsza redukcja szumu tła
+      const compressed = Math.log10(1 + val * 5) / Math.log10(50); 
       return Math.min(255, Math.max(0, compressed * 255));
     });
   }
 
   public calculateRobustThreshold(scores: number[]) {
-    if (scores.length < 10) return 5.0;
+    if (scores.length < 10) return 3.5;
     
     const sorted = [...scores].sort((a, b) => a - b);
     
-    // ZMIANA: Używamy 75. percentyla (Q3) zamiast mediany jako punktu odniesienia.
-    // Dzięki temu normalny, lekko "szumiący" sygnał nie podbija progu tak szybko.
-    const q3Index = Math.floor(sorted.length * 0.75);
-    const baseline = sorted[q3Index];
+    // ZMIANA: Przesunięcie na 65. percentyl (bliżej sygnału niż Q3)
+    const baselineIndex = Math.floor(sorted.length * 0.65);
+    const baseline = sorted[baselineIndex];
     
-    // Obliczamy odchylenie od baseline (MAD wokół Q3)
     const absoluteDeviations = scores.map(s => Math.abs(s - baseline));
     const sortedDeviations = [...absoluteDeviations].sort((a, b) => a - b);
     const mad = sortedDeviations[Math.floor(sortedDeviations.length / 2)];
     
-    // Mnożnik agresywności: mniejsza czułość (np 2) -> bardzo wysoki próg
-    const multiplier = 15.0 - (this.sensitivity * 1.0);
+    // ZMIANA: Znacznie mniejszy mnożnik (wcześniej dochodził do 10-14, teraz max 6)
+    const multiplier = 6.0 - (this.sensitivity * 0.4);
     const sigmaEst = mad * 1.4826;
     
-    // Minimalny próg (Safety floor) na poziomie 1.0
-    return Math.max(1.0, baseline + (multiplier * sigmaEst));
+    // Safety floor obniżony na 0.5
+    return Math.max(0.5, baseline + (multiplier * sigmaEst));
   }
 
   private updateThreshold() {
@@ -188,7 +185,7 @@ class AnomalyDetector {
   public async clearKnowledge() {
     this.errorStats = [];
     this.totalProcessedFiles = 0;
-    this.threshold = 5.0;
+    this.threshold = 3.5;
     localStorage.removeItem('sentinel_stats');
     try { await tf.io.removeModel(STORAGE_PATH); } catch {}
     await this.createNewModel();

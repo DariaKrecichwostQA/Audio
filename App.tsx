@@ -200,10 +200,9 @@ const App: React.FC = () => {
       }
 
       // KOMPLEKSOWY PRÓG LOKALNY:
-      // Bierzemy pod uwagę wiedzę globalną modelu ORAZ statystykę bieżącego pliku.
       const localAnalysisThreshold = detector.calculateRobustThreshold(allScores);
       const finalThresh = detector.getTotalFiles() > 0 
-        ? (detector.getThreshold() * 0.7 + localAnalysisThreshold * 0.3) 
+        ? (detector.getThreshold() * 0.6 + localAnalysisThreshold * 0.4) 
         : localAnalysisThreshold;
 
       setDynamicThreshold(finalThresh);
@@ -211,18 +210,17 @@ const App: React.FC = () => {
       const finalChartData: AudioChartData[] = [];
       const detectedSegments: Anomaly[] = [];
       
-      // ZWIĘKSZONY BUFOR WYGŁADZANIA (18 próbek)
-      // Pomaga wyeliminować regularne "cyknięcia" i skupić się na trwałej nieregularności
+      // SKRÓCONY BUFOR WYGŁADZANIA (12 próbek) dla lepszej czułości na piki
       let smoothScoreBuffer: number[] = [];
       let smoothHzBuffer: number[] = [];
 
       preliminaryPoints.forEach((point, idx) => {
         smoothScoreBuffer.push(point.score);
-        if (smoothScoreBuffer.length > 18) smoothScoreBuffer.shift();
+        if (smoothScoreBuffer.length > 12) smoothScoreBuffer.shift();
         const smoothedScore = smoothScoreBuffer.reduce((a,b)=>a+b,0) / smoothScoreBuffer.length;
 
         smoothHzBuffer.push(point.hz);
-        if (smoothHzBuffer.length > 10) smoothHzBuffer.shift();
+        if (smoothHzBuffer.length > 8) smoothHzBuffer.shift();
         const smoothedHz = smoothHzBuffer.reduce((a,b)=>a+b,0) / smoothHzBuffer.length;
 
         if (idx % 2 === 0) {
@@ -234,11 +232,10 @@ const App: React.FC = () => {
           });
         }
 
-        // Segmentacja z progiem "Nieregularności"
-        // Musi być co najmniej 20% ponad dynamiczny próg, aby uniknąć szumów na krawędzi
-        if (smoothedScore > (finalThresh * 1.2)) {
+        // Segmentacja bez sztucznego marginesu (wcześniej było * 1.2)
+        if (smoothedScore > finalThresh) {
           const lastSeg = detectedSegments[detectedSegments.length - 1];
-          const mergeThreshold = 0.6; // Łączenie segmentów blisko siebie
+          const mergeThreshold = 0.5; // Łączenie segmentów blisko siebie
 
           if (!lastSeg || (point.timestamp - (lastSeg.offsetSeconds! + lastSeg.durationSeconds)) > mergeThreshold) {
             detectedSegments.push({ 
@@ -247,21 +244,20 @@ const App: React.FC = () => {
               offsetSeconds: point.timestamp, 
               durationSeconds: frameDurationSec, 
               intensity: smoothedScore / finalThresh, 
-              severity: smoothedScore > finalThresh * 3.0 ? 'High' : 'Medium', 
+              severity: smoothedScore > finalThresh * 2.5 ? 'High' : 'Medium', 
               description: `SEGMENT`, 
-              type: 'Atypical Pattern' 
+              type: 'Dynamic Variance' 
             });
           } else {
             lastSeg.durationSeconds = point.timestamp - lastSeg.offsetSeconds!;
             lastSeg.intensity = Math.max(lastSeg.intensity, smoothedScore / finalThresh);
-            if (smoothedScore > finalThresh * 3.0) lastSeg.severity = 'High';
+            if (smoothedScore > finalThresh * 2.5) lastSeg.severity = 'High';
           }
         }
         if (idx % 1000 === 0) setBatchProgress(50 + Math.round((idx / preliminaryPoints.length) * 50));
       });
 
-      // Tylko segmenty trwające min 0.3s (ignorujemy błędy przejściowe)
-      const finalAnomalies = detectedSegments.filter(s => s.durationSeconds >= 0.3);
+      const finalAnomalies = detectedSegments.filter(s => s.durationSeconds >= 0.25);
 
       setChartData(finalChartData);
       setAnomalies(finalAnomalies);
