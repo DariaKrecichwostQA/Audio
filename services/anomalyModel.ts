@@ -18,6 +18,7 @@ class AnomalyDetector {
   private errorStats: number[] = [];
   private totalProcessedFiles: number = 0;
   private isModelLoaded: boolean = false;
+  private isReady: boolean = false;
 
   constructor() {
     this.init();
@@ -25,21 +26,17 @@ class AnomalyDetector {
 
   private async init() {
     try {
+      await tf.ready();
       try {
         await tf.setBackend('webgpu');
       } catch (e) {
-        await tf.setBackend('webgl');
-      }
-
-      await tf.ready();
-
-      if (tf.getBackend() === 'webgl') {
         try {
-          tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 128 * 1024); 
-          tf.env().set('WEBGL_FLUSH_THRESHOLD', 1);
-          tf.env().set('WEBGL_CPU_FORWARD', false);
-        } catch (e) {}
+          await tf.setBackend('webgl');
+        } catch (e2) {
+          await tf.setBackend('cpu');
+        }
       }
+      this.isReady = true;
       
       try {
         this.model = await tf.loadLayersModel(STORAGE_PATH);
@@ -51,18 +48,20 @@ class AnomalyDetector {
       } catch (loadErr) {
         await this.createNewModel();
       }
-      
-      const savedStats = localStorage.getItem('sentinel_stats');
-      if (savedStats) {
-        const parsed = JSON.parse(savedStats);
-        this.errorStats = parsed.errorStats || [];
-        this.totalProcessedFiles = parsed.totalProcessedFiles || 0;
-        this.threshold = parsed.threshold || 3.5;
-        this.sensitivity = parsed.sensitivity || 5.0;
-      }
+      this.loadStats();
     } catch (e) {
-      console.error("Inicjalizacja błąd:", e);
-      await tf.setBackend('cpu');
+      console.error("AI Init Error:", e);
+    }
+  }
+
+  private loadStats() {
+    const savedStats = localStorage.getItem('sentinel_stats');
+    if (savedStats) {
+      const parsed = JSON.parse(savedStats);
+      this.errorStats = parsed.errorStats || [];
+      this.totalProcessedFiles = parsed.totalProcessedFiles || 0;
+      this.threshold = parsed.threshold || 3.5;
+      this.sensitivity = parsed.sensitivity || 5.0;
     }
   }
 
@@ -75,7 +74,6 @@ class AnomalyDetector {
     const output = tf.layers.timeDistributed({
       layer: tf.layers.dense({ units: 128, activation: 'sigmoid' })
     }).apply(decoder) as tf.SymbolicTensor;
-    
     this.model = tf.model({ inputs: input, outputs: output });
     this.model.compile({ optimizer: tf.train.adam(this.config.learningRate), loss: 'meanSquaredError' });
   }
@@ -89,7 +87,7 @@ class AnomalyDetector {
   }
   public getWindowSize() { return this.windowSize; }
   public getTotalFiles() { return this.totalProcessedFiles; }
-  public getBackendName() { return tf.getBackend().toUpperCase(); }
+  public getBackendName() { return this.isReady ? tf.getBackend().toUpperCase() : 'WAITING'; }
   public getIsLoadedFromStorage() { return this.isModelLoaded; }
 
   public scaleFrame(frame: number[]) {
@@ -122,39 +120,30 @@ class AnomalyDetector {
 
   public async trainOnFile(frames: number[][], label: 'Normal' | 'Anomaly') {
     if (!this.model) return { error: 0 };
-    
     const sequences: number[][][] = [];
     for (let i = 0; i <= frames.length - this.windowSize; i += 4) {
       sequences.push(frames.slice(i, i + this.windowSize));
     }
     if (sequences.length === 0) return { error: 0 };
 
-    const xs = tf.tensor3d(sequences);
-    const divScalar = tf.scalar(255);
-    const normXs = xs.div(divScalar);
-
-    try {
+    return tf.tidy(() => {
+      const xs = tf.tensor3d(sequences);
+      const normXs = xs.div(tf.scalar(255));
+      
       if (label === 'Normal') {
-        await this.model.fit(normXs, normXs, { 
-          epochs: 1, 
-          batchSize: this.config.batchSize, 
-          verbose: 0,
-          shuffle: true 
+        this.model!.fit(normXs, normXs, { epochs: 1, batchSize: 8, verbose: 0 }).then(() => {
+           this.totalProcessedFiles++;
+           this.persist();
         });
-        this.totalProcessedFiles++;
       }
 
-      const predictions = this.model.predict(normXs) as tf.Tensor;
-      
-      // Naprawa błędu AXIS: Obliczamy MSE ręcznie na osiach 1 i 2 (wymiar czasowy i cechy)
-      // aby otrzymać błąd dla każdego elementu w batchu (oś 0).
-      const diff = tf.sub(normXs, predictions);
-      const squaredDiff = tf.square(diff);
-      const errors = squaredDiff.mean([1, 2]); // Redukujemy wymiar [Batch, Window, Features] -> [Batch]
-      
-      const errorData = await errors.data();
-      const avgError = (Array.from(errorData).reduce((a, b) => a + b, 0) / errorData.length) * 1000;
-      
+      const predictions = this.model!.predict(normXs) as tf.Tensor;
+      const squaredDiff = tf.square(tf.sub(normXs, predictions));
+      const errors = squaredDiff.mean([1, 2]); 
+      // Fix: Cast errorData to number[] to avoid 'unknown' type in reduce during arithmetic operations
+      const errorData = Array.from(errors.dataSync()) as number[];
+      const avgError = (errorData.reduce((a: number, b: number) => a + b, 0) / errorData.length) * 1000;
+
       if (label === 'Normal') {
         for(let i = 0; i < errorData.length; i += 2) {
           this.errorStats.push(errorData[i] * 1000);
@@ -162,46 +151,19 @@ class AnomalyDetector {
         if (this.errorStats.length > 1000) this.errorStats = this.errorStats.slice(-1000);
         this.updateThreshold();
       }
-
-      predictions.dispose();
-      diff.dispose();
-      squaredDiff.dispose();
-      errors.dispose();
-      
-      await this.persist();
       return { error: avgError };
-    } finally {
-      xs.dispose();
-      normXs.dispose();
-      divScalar.dispose();
-    }
+    });
   }
 
   public async predict(sequence: number[][]) {
     if (!this.model) return { score: 0 };
-    
-    const input = tf.tensor3d([sequence]);
-    const divScalar = tf.scalar(255);
-    const normInput = input.div(divScalar);
-    const output = this.model.predict(normInput) as tf.Tensor;
-    
-    // Ręczne obliczanie błędu MSE dla pojedynczej sekwencji (wynik to skalar)
-    const diff = tf.sub(normInput, output);
-    const squaredDiff = tf.square(diff);
-    const errorTensor = squaredDiff.mean();
-    
-    const data = await errorTensor.data();
-    const score = data[0] * 1000;
-
-    input.dispose();
-    normInput.dispose();
-    divScalar.dispose();
-    output.dispose();
-    diff.dispose();
-    squaredDiff.dispose();
-    errorTensor.dispose();
-
-    return { score };
+    return tf.tidy(() => {
+      const input = tf.tensor3d([sequence]);
+      const normInput = input.div(tf.scalar(255));
+      const output = this.model!.predict(normInput) as tf.Tensor;
+      const score = tf.losses.meanSquaredError(normInput, output).dataSync()[0] * 1000;
+      return { score };
+    });
   }
 
   private async persist() {
@@ -218,6 +180,34 @@ class AnomalyDetector {
     }
   }
 
+  public async importModelFromFiles(jsonFile: File, weightsFile: File, statsFile?: File) {
+    try {
+      const loadedModel = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, weightsFile]));
+      loadedModel.compile({
+        optimizer: tf.train.adam(this.config.learningRate),
+        loss: 'meanSquaredError'
+      });
+      this.model = loadedModel;
+      this.isModelLoaded = true;
+
+      if (statsFile) {
+        const text = await statsFile.text();
+        const parsed = JSON.parse(text);
+        this.errorStats = parsed.errorStats || [];
+        this.totalProcessedFiles = parsed.totalProcessedFiles || 0;
+        this.threshold = parsed.threshold || 3.5;
+        this.sensitivity = parsed.sensitivity || 5.0;
+        localStorage.setItem('sentinel_stats', text);
+      }
+      
+      await this.persist();
+      return true;
+    } catch (e) {
+      console.error("Import error:", e);
+      return false;
+    }
+  }
+
   public async clearKnowledge() {
     this.errorStats = [];
     this.totalProcessedFiles = 0;
@@ -228,11 +218,28 @@ class AnomalyDetector {
   }
 
   public async exportModel() {
-    if (this.model) await this.model.save('downloads://sentinel-model');
+    if (!this.model) return;
+    // Eksport modelu (pobierze model.json i model.weights.bin)
+    await this.model.save('downloads://sentinel-model');
+    
+    // Eksport statystyk do pliku JSON
+    const stats = {
+      errorStats: this.errorStats,
+      totalProcessedFiles: this.totalProcessedFiles,
+      threshold: this.threshold,
+      sensitivity: this.sensitivity
+    };
+    const blob = new Blob([JSON.stringify(stats, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sentinel_stats.json';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  public getMemInfo() {
-    return tf.memory();
+  public getMemInfo() { 
+    try { return tf.memory(); } catch { return { numBytes: 0 }; }
   }
 }
 
